@@ -3,7 +3,7 @@ Error taxonomy per spec §6.
 All backend errors use these typed codes. Never return raw exceptions.
 """
 from fastapi import HTTPException
-from app.models.file import ErrorDetail, ErrorResponse
+from app.schemas.errors import ErrorDetail, ErrorResponse
 
 
 class CloudFSError(Exception):

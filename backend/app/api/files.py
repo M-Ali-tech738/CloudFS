@@ -3,20 +3,17 @@ Files API — list, get, upload, delete, rename, preview, and SSE events.
 All endpoints are [PROTECTED] and require valid JWT cookie.
 Write operations require If-Match header for optimistic locking (spec §7).
 """
-import asyncio
 import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
-from google.oauth2.credentials import Credentials
 import httpx
 
 from app.config import get_settings
 from app.core.auth_deps import get_current_user_tokens
 from app.core.errors import (
     ValidationFileTooLargeError,
-    ConflictStaleVersionError,
     ValidationBadRequestError,
 )
 from app.models.file import FileList, FileModel, UploadResult

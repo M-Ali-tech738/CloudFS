@@ -24,14 +24,16 @@ from app.core.errors import (
 from app.models.file import FileModel, FileList, FileType, UploadResult
 
 
-# Drive API fields to request — minimise response payload
-_FILE_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,etag,version,webViewLink,thumbnailLink"
+# Drive API v3 fields — etag and version removed (v2 only)
+_FILE_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,thumbnailLink"
 _LIST_FIELDS = f"nextPageToken,files({_FILE_FIELDS})"
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def _parse_file(item: dict) -> FileModel:
+    # Use modifiedTime as a surrogate ETag since Drive v3 dropped etag field
+    etag = item.get("modifiedTime", "")
     return FileModel(
         id=item["id"],
         name=item["name"],
@@ -41,8 +43,8 @@ def _parse_file(item: dict) -> FileModel:
         created_at=datetime.fromisoformat(item["createdTime"].replace("Z", "+00:00")),
         modified_at=datetime.fromisoformat(item["modifiedTime"].replace("Z", "+00:00")),
         parent_folder=(item.get("parents") or [None])[0],
-        etag=item.get("etag", ""),
-        version=int(item.get("version", 0)),
+        etag=etag,
+        version=0,
         web_view_link=item.get("webViewLink"),
         thumbnail_link=item.get("thumbnailLink"),
     )
@@ -51,11 +53,15 @@ def _parse_file(item: dict) -> FileModel:
 def _handle_drive_error(e: HttpError, file_id: str = "") -> None:
     """Translate Google Drive HTTP errors to CloudFS typed errors."""
     status = e.resp.status
+    print(f"Drive API error {status}: {e.content}")
     if status == 404:
         raise StorageNotFoundError(file_id)
     if status == 403:
-        content = json.loads(e.content.decode())
-        reason = content.get("error", {}).get("errors", [{}])[0].get("reason", "")
+        try:
+            content = json.loads(e.content.decode())
+            reason = content.get("error", {}).get("errors", [{}])[0].get("reason", "")
+        except Exception:
+            reason = ""
         if reason in ("storageQuotaExceeded", "teamDriveFileLimitExceeded"):
             raise StorageQuotaExceededError()
         raise StorageProviderError(str(e))
@@ -99,6 +105,9 @@ class GoogleDriveAdapter(StorageInterface):
             )
         except HttpError as e:
             _handle_drive_error(e)
+        except Exception as e:
+            print(f"Unexpected error in list_files: {type(e).__name__}: {e}")
+            raise StorageProviderError(str(e))
 
     async def get_file(self, file_id: str) -> FileModel:
         try:
@@ -110,6 +119,9 @@ class GoogleDriveAdapter(StorageInterface):
             return _parse_file(item)
         except HttpError as e:
             _handle_drive_error(e, file_id)
+        except Exception as e:
+            print(f"Unexpected error in get_file: {type(e).__name__}: {e}")
+            raise StorageProviderError(str(e))
 
     async def upload_file(
         self,
@@ -129,22 +141,30 @@ class GoogleDriveAdapter(StorageInterface):
             return UploadResult(file=_parse_file(item))
         except HttpError as e:
             _handle_drive_error(e)
+        except Exception as e:
+            print(f"Unexpected error in upload_file: {type(e).__name__}: {e}")
+            raise StorageProviderError(str(e))
 
     async def delete_file(self, file_id: str, etag: str) -> None:
         try:
+            # Fetch current modifiedTime and compare against provided etag
+            current = await self.get_file(file_id)
+            if current.etag != etag:
+                raise ConflictStaleVersionError(file_id)
+
             await asyncio.to_thread(
-                lambda: self._service.files()
-                .delete(fileId=file_id)
-                .execute()
-                # Note: Drive API v3 doesn't natively expose If-Match on delete;
-                # we fetch-then-compare ETag as a guard.
+                lambda: self._service.files().delete(fileId=file_id).execute()
             )
+        except (ConflictStaleVersionError, StorageNotFoundError):
+            raise
         except HttpError as e:
             _handle_drive_error(e, file_id)
+        except Exception as e:
+            print(f"Unexpected error in delete_file: {type(e).__name__}: {e}")
+            raise StorageProviderError(str(e))
 
     async def rename_file(self, file_id: str, new_name: str, etag: str) -> FileModel:
         try:
-            # Fetch current to validate ETag before mutating
             current = await self.get_file(file_id)
             if current.etag != etag:
                 raise ConflictStaleVersionError(file_id)
@@ -155,21 +175,23 @@ class GoogleDriveAdapter(StorageInterface):
                 .execute()
             )
             return _parse_file(item)
+        except (ConflictStaleVersionError, StorageNotFoundError):
+            raise
         except HttpError as e:
             _handle_drive_error(e, file_id)
+        except Exception as e:
+            print(f"Unexpected error in rename_file: {type(e).__name__}: {e}")
+            raise StorageProviderError(str(e))
 
     async def get_preview_url(self, file_id: str) -> str:
         file = await self.get_file(file_id)
         if file.web_view_link:
             return file.web_view_link
-        # Fallback: generate a temporary export link
         return f"https://drive.google.com/file/d/{file_id}/view"
 
     async def watch_changes(self, user_id: str) -> AsyncIterator[dict]:
         """
-        Polls Drive changes API and yields events.
-        In production this would use Drive Push Notifications (webhooks).
-        For Phase 1 SSE: simple polling every 10s.
+        Polls Drive changes API and yields events for SSE stream.
         """
         try:
             start_token_resp = await asyncio.to_thread(
@@ -181,7 +203,10 @@ class GoogleDriveAdapter(StorageInterface):
                 await asyncio.sleep(10)
                 result = await asyncio.to_thread(
                     lambda: self._service.changes()
-                    .list(pageToken=page_token, fields="newStartPageToken,changes(fileId,file(parents))")
+                    .list(
+                        pageToken=page_token,
+                        fields="newStartPageToken,changes(fileId,file(parents))",
+                    )
                     .execute()
                 )
                 for change in result.get("changes", []):
@@ -197,3 +222,5 @@ class GoogleDriveAdapter(StorageInterface):
                     page_token = new_token
         except HttpError as e:
             _handle_drive_error(e)
+        except Exception as e:
+            print(f"Unexpected error in watch_changes: {type(e).__name__}: {e}")

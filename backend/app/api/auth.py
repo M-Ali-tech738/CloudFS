@@ -1,13 +1,12 @@
 """
 Auth endpoints — Google OAuth flow (spec §4, steps 1–10) + logout.
 """
-from datetime import datetime, timezone, timedelta
-
-from fastapi import APIRouter, Depends, Response, Request
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select
+import httpx
 
 from app.config import get_settings
 from app.db.database import get_db, UserToken
@@ -22,6 +21,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/drive",
 ]
 
@@ -44,12 +44,11 @@ def _make_flow() -> Flow:
 
 @router.get("/google/login")
 async def google_login():
-    """Step 2–3: Redirect browser to Google OAuth consent screen."""
+    """Step 2-3: Redirect browser to Google OAuth consent screen."""
     flow = _make_flow()
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",  # Force consent to always receive refresh_token
+        prompt="consent",  # Always force consent so Google always returns refresh_token
     )
     return RedirectResponse(auth_url)
 
@@ -61,38 +60,55 @@ async def google_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Steps 4–7: Exchange auth code → Google tokens → issue backend JWT cookie.
+    Steps 4-7: Exchange auth code -> Google tokens -> issue backend JWT cookie.
     """
     try:
         flow = _make_flow()
         flow.fetch_token(code=code)
         credentials = flow.credentials
-    except Exception:
+    except Exception as e:
+        print(f"OAuth error: {e}")
         raise AuthGoogleRevokedError()
 
+    print(f"Access token present: {bool(credentials.token)}")
+    print(f"Refresh token present: {bool(credentials.refresh_token)}")
+    print(f"Scopes granted: {credentials.scopes}")
+
     # Get user info
-    import httpx
     async with httpx.AsyncClient() as client:
         user_info_resp = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {credentials.token}"},
         )
     user_info = user_info_resp.json()
-    user_id = user_info["id"]
-    email = user_info["email"]
+    print(f"User info: {user_info}")
 
-    # Encrypt refresh token → store in PostgreSQL
+    user_id = user_info.get("id")
+    email = user_info.get("email")
+
+    if not user_id or not email:
+        raise AuthGoogleRevokedError()
+
+    # Encrypt refresh token -> store in PostgreSQL
     refresh_token = credentials.refresh_token
     if not refresh_token:
-        # User may have already authorized; check for existing token
+        # No refresh token — check if we already have one stored for this user
         existing = await db.execute(
             select(UserToken)
             .where(UserToken.user_id == user_id, UserToken.revoked == False)
             .limit(1)
         )
         if not existing.scalar_one_or_none():
+            # No stored token either — user must revoke access and re-auth
+            print(f"No refresh token and none stored for user {user_id}")
             raise AuthGoogleRevokedError()
     else:
+        # Store the new refresh token (revoke any old ones first)
+        await db.execute(
+            __import__("sqlalchemy").update(UserToken)
+            .where(UserToken.user_id == user_id)
+            .values(revoked=True)
+        )
         enc_token, iv = encrypt_token(refresh_token)
         token_row = UserToken(
             user_id=user_id,
@@ -129,7 +145,6 @@ async def logout(
     """Revoke JWT (add JTI to Redis blocklist) and clear cookie."""
     if cloudfs_token:
         await revoke_jwt(cloudfs_token)
-
     response.delete_cookie("cloudfs_token", path="/")
     return {"message": "Logged out successfully"}
 
