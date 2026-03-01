@@ -14,7 +14,7 @@ engine = create_async_engine(
     settings.database_url,
     echo=settings.environment == "development",
     pool_pre_ping=True,
-    # Add these connection arguments to prevent prepared statement errors with Supabase pooler
+    # Add this block to fix the PgBouncer/Supabase conflict
     connect_args={
         "statement_cache_size": 0,
         "prepared_statement_cache_size": 0
