@@ -14,7 +14,8 @@ import type {
   ErrorCode,
 } from "@/types";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Use relative URLs so requests go through Next.js rewrites
+const BASE = ""; // Empty string means use relative URLs
 
 // ── Error handling ────────────────────────────────────────────────────────────
 
@@ -90,7 +91,10 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`${BASE}${path}`, {
+  // Add /api prefix to all requests to use Next.js rewrites
+  const apiPath = path.startsWith('/') ? `/api${path}` : `/api/${path}`;
+
+  const res = await fetch(apiPath, {
     ...init,
     headers,
     credentials: "include", // Send HttpOnly cookie automatically
@@ -108,7 +112,7 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
 
 export const auth = {
   /** Redirect to Google OAuth. Backend handles the full flow. */
-  loginUrl: () => `${BASE}/auth/google/login`,
+  loginUrl: () => `/api/auth/google/login`,  // Use /api prefix
 
   me: () => apiFetch<UserInfo>("/auth/me"),
 
@@ -166,7 +170,8 @@ export const files = {
 export function createEventSource(
   onEvent: (e: { type: string; folder_id?: string }) => void
 ): EventSource {
-  const es = new EventSource(`${BASE}/events`, { withCredentials: true });
+  // Use relative URL with /api prefix for SSE
+  const es = new EventSource(`/api/events`, { withCredentials: true });
   es.onmessage = (event) => {
     try {
       onEvent(JSON.parse(event.data));
