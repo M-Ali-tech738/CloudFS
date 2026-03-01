@@ -122,14 +122,14 @@ async def google_callback(
     # Issue backend JWT
     jwt_token = await create_jwt(user_id=user_id, email=email)
 
-    # Set as HttpOnly cookie (spec §4)
+    # Set as HttpOnly cookie (spec §4) - with cross-domain settings
     redirect = RedirectResponse(url=f"{settings.frontend_url}/files")
     redirect.set_cookie(
         key="cloudfs_token",
         value=jwt_token,
         httponly=True,
-        secure=True,  # Always True for HTTPS
-        samesite="lax",  # Changed from "none" to "lax"
+        secure=True,          # Must be True for cross-domain
+        samesite="none",      # Must be "none" for cross-domain
         max_age=settings.jwt_expire_hours * 3600,
         path="/",
     )
@@ -151,7 +151,7 @@ async def logout(
         key="cloudfs_token",
         path="/",
         secure=True,
-        samesite="lax",
+        samesite="none",
         httponly=True,
     )
     return {"message": "Logged out successfully"}
