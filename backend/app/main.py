@@ -92,6 +92,29 @@ async def startup():
     logger.info("CloudFS backend started")
 
 
+# FOR DEBUGGING
+@app.get("/debug-cors")
+async def debug_cors(request: Request):
+    """Debug endpoint to check CORS configuration"""
+    return {
+        "frontend_url_setting": settings.frontend_url,
+        "environment": settings.environment,
+        "is_production": settings.is_production,
+        "request_origin": request.headers.get("origin"),
+        "request_method": request.method,
+        "request_url": str(request.url),
+        "all_settings": {
+            "google_redirect_uri": settings.google_redirect_uri,
+            "frontend_url": settings.frontend_url,
+            "environment": settings.environment,
+        }
+    }
+@app.get("/test")
+async def test():
+    """Simple test endpoint to check if API is reachable"""
+    return {"status": "ok", "message": "API is working"}
+###
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
