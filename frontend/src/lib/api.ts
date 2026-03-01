@@ -1,9 +1,5 @@
 /**
  * API client — all backend communication.
- *
- * CRITICAL: This file must NEVER import Google Drive SDK or tokens.
- * The frontend only talks to the CloudFS backend (spec §3).
- * Auth is handled automatically via the HttpOnly cookie set by the backend.
  */
 import type {
   FileList,
@@ -13,11 +9,6 @@ import type {
   UserInfo,
   ErrorCode,
 } from "@/types";
-
-// Use absolute URL from environment variable so requests go directly to Render
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-// ── Error handling ────────────────────────────────────────────────────────────
 
 export class CloudFSApiError extends Error {
   constructor(
@@ -41,15 +32,9 @@ async function parseError(res: Response): Promise<CloudFSApiError> {
       body.error.details
     );
   } catch {
-    return new CloudFSApiError(
-      "SERVER_INTERNAL",
-      `HTTP ${res.status}`,
-      res.status
-    );
+    return new CloudFSApiError("SERVER_INTERNAL", `HTTP ${res.status}`, res.status);
   }
 }
-
-// ── Retry strategy (spec §6) ──────────────────────────────────────────────────
 
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -63,8 +48,8 @@ async function withRetry<T>(
     } catch (err) {
       if (err instanceof CloudFSApiError && err.code === code && attempt < maxRetries) {
         const delay = code === "STORAGE_RATE_LIMITED"
-          ? Math.pow(2, attempt) * 1000  // Exponential backoff: 1s, 2s, 4s, 8s
-          : 2000;                          // Fixed 2s for STORAGE_PROVIDER_ERROR
+          ? Math.pow(2, attempt) * 1000
+          : 2000;
         await new Promise((r) => setTimeout(r, delay));
         attempt++;
         continue;
@@ -74,11 +59,15 @@ async function withRetry<T>(
   }
 }
 
-// ── Core fetch ────────────────────────────────────────────────────────────────
+// Read JWT token from cookie
+function getToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/(?:^|;\s*)cloudfs_token=([^;]+)/);
+  return match ? match[1] : null;
+}
 
 interface FetchOptions extends Omit<RequestInit, "body"> {
   body?: BodyInit | null;
-  /** If-Match ETag for optimistic locking on write operations */
   etag?: string;
 }
 
@@ -86,48 +75,40 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
   const { etag, ...init } = opts;
   const headers = new Headers(init.headers as HeadersInit);
 
+  // Attach token from cookie as Authorization header
+  const token = getToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
   if (etag) headers.set("If-Match", etag);
   if (!(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
-  // Build the full URL to Render backend directly
-  const apiPath = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}${path.startsWith("/") ? path : `/${path}`}`;
 
-  const res = await fetch(apiPath, {
+  const res = await fetch(apiUrl, {
     ...init,
     headers,
-    credentials: "include", // Send HttpOnly cookie automatically
+    credentials: "include",
   });
 
-  if (!res.ok) {
-    throw await parseError(res);
-  }
-
+  if (!res.ok) throw await parseError(res);
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
-
 export const auth = {
-  /** Redirect to Google OAuth. Backend handles the full flow. */
-  loginUrl: () => `${API_BASE}/auth/google/login`,
-
+  loginUrl: () => `${process.env.NEXT_PUBLIC_API_URL}/auth/google/login`,
   me: () => apiFetch<UserInfo>("/auth/me"),
-
   logout: () => apiFetch<void>("/auth/logout", { method: "POST" }),
 };
-
-// ── Files ─────────────────────────────────────────────────────────────────────
 
 export const files = {
   list: (folderId = "root", pageToken?: string) =>
     withRetry(
-      () =>
-        apiFetch<FileList>(
-          `/files?folder_id=${folderId}${pageToken ? `&page_token=${pageToken}` : ""}`
-        ),
+      () => apiFetch<FileList>(`/files?folder_id=${folderId}${pageToken ? `&page_token=${pageToken}` : ""}`),
       "STORAGE_RATE_LIMITED"
     ),
 
@@ -138,11 +119,7 @@ export const files = {
     const form = new FormData();
     form.append("file", file);
     return withRetry(
-      () =>
-        apiFetch<UploadResult>(`/upload?folder_id=${folderId}`, {
-          method: "POST",
-          body: form,
-        }),
+      () => apiFetch<UploadResult>(`/upload?folder_id=${folderId}`, { method: "POST", body: form }),
       "STORAGE_RATE_LIMITED"
     );
   },
@@ -152,12 +129,11 @@ export const files = {
 
   rename: (fileId: string, newName: string, etag: string) =>
     withRetry(
-      () =>
-        apiFetch<FileModel>(`/file/${fileId}`, {
-          method: "PATCH",
-          etag,
-          body: JSON.stringify({ name: newName }),
-        }),
+      () => apiFetch<FileModel>(`/file/${fileId}`, {
+        method: "PATCH",
+        etag,
+        body: JSON.stringify({ name: newName }),
+      }),
       "STORAGE_PROVIDER_ERROR"
     ),
 
@@ -165,13 +141,12 @@ export const files = {
     apiFetch<{ preview_url: string }>(`/preview/${fileId}`),
 };
 
-// ── SSE — change notifications ─────────────────────────────────────────────────
-
 export function createEventSource(
   onEvent: (e: { type: string; folder_id?: string }) => void
 ): EventSource {
-  // Connect directly to Render backend for SSE
-  const es = new EventSource(`${API_BASE}/events`, { withCredentials: true });
+  const token = getToken();
+  const url = `${process.env.NEXT_PUBLIC_API_URL}/events${token ? `?token=${token}` : ""}`;
+  const es = new EventSource(url, { withCredentials: true });
   es.onmessage = (event) => {
     try {
       onEvent(JSON.parse(event.data));

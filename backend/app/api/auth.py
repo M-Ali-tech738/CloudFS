@@ -48,7 +48,7 @@ async def google_login():
     flow = _make_flow()
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        prompt="consent",  # Always force consent so Google always returns refresh_token
+        prompt="consent",
     )
     return RedirectResponse(auth_url)
 
@@ -60,7 +60,9 @@ async def google_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Steps 4-7: Exchange auth code -> Google tokens -> issue backend JWT cookie.
+    Steps 4-7: Exchange auth code -> Google tokens -> redirect to Vercel
+    with token so Vercel sets the cookie on its own domain (fixes cross-domain
+    cookie issues on Android Chrome with third-party cookies blocked).
     """
     try:
         flow = _make_flow()
@@ -70,10 +72,6 @@ async def google_callback(
         print(f"OAuth error: {e}")
         raise AuthGoogleRevokedError()
 
-    print(f"Access token present: {bool(credentials.token)}")
-    print(f"Refresh token present: {bool(credentials.refresh_token)}")
-    print(f"Scopes granted: {credentials.scopes}")
-
     # Get user info
     async with httpx.AsyncClient() as client:
         user_info_resp = await client.get(
@@ -81,7 +79,6 @@ async def google_callback(
             headers={"Authorization": f"Bearer {credentials.token}"},
         )
     user_info = user_info_resp.json()
-    print(f"User info: {user_info}")
 
     user_id = user_info.get("id")
     email = user_info.get("email")
@@ -92,18 +89,15 @@ async def google_callback(
     # Encrypt refresh token -> store in PostgreSQL
     refresh_token = credentials.refresh_token
     if not refresh_token:
-        # No refresh token — check if we already have one stored for this user
         existing = await db.execute(
             select(UserToken)
             .where(UserToken.user_id == user_id, UserToken.revoked == False)
             .limit(1)
         )
         if not existing.scalar_one_or_none():
-            # No stored token either — user must revoke access and re-auth
             print(f"No refresh token and none stored for user {user_id}")
             raise AuthGoogleRevokedError()
     else:
-        # Store the new refresh token (revoke any old ones first)
         await db.execute(
             __import__("sqlalchemy").update(UserToken)
             .where(UserToken.user_id == user_id)
@@ -122,18 +116,11 @@ async def google_callback(
     # Issue backend JWT
     jwt_token = await create_jwt(user_id=user_id, email=email)
 
-    # Set as HttpOnly cookie (spec §4) - with cross-domain settings
-    redirect = RedirectResponse(url=f"{settings.frontend_url}/files")
-    redirect.set_cookie(
-        key="cloudfs_token",
-        value=jwt_token,
-        httponly=True,
-        secure=True,          # Must be True for cross-domain
-        samesite="none",      # Must be "none" for cross-domain
-        max_age=settings.jwt_expire_hours * 3600,
-        path="/",
+    # Redirect to Vercel /auth/callback with token as query param
+    # Vercel will set the cookie on its own domain — fixes cross-domain cookie issues
+    return RedirectResponse(
+        url=f"{settings.frontend_url}/auth/callback?token={jwt_token}"
     )
-    return redirect
 
 
 @router.post("/logout")
@@ -145,15 +132,7 @@ async def logout(
     """Revoke JWT (add JTI to Redis blocklist) and clear cookie."""
     if cloudfs_token:
         await revoke_jwt(cloudfs_token)
-
-    # Properly clear the cookie with same settings
-    response.delete_cookie(
-        key="cloudfs_token",
-        path="/",
-        secure=True,
-        samesite="none",
-        httponly=True,
-    )
+    response.delete_cookie("cloudfs_token", path="/")
     return {"message": "Logged out successfully"}
 
 

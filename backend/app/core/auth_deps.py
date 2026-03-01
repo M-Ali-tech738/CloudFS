@@ -1,8 +1,8 @@
 """
-FastAPI dependency — extracts JWT from HttpOnly cookie, verifies it,
-and returns the current user's payload. Used on all [PROTECTED] endpoints.
+FastAPI dependency — extracts JWT from Authorization header or cookie,
+verifies it, and returns the current user's payload.
 """
-from fastapi import Cookie, Depends
+from fastapi import Cookie, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -13,15 +13,30 @@ from app.core.errors import AuthTokenInvalidError, AuthGoogleRevokedError
 
 
 async def get_current_user(
+    request: Request,
     cloudfs_token: str | None = Cookie(default=None),
 ) -> dict:
     """
-    Verifies the HttpOnly JWT cookie and returns the decoded payload.
-    Raises AuthTokenInvalidError if cookie is missing or invalid.
+    Extracts JWT from:
+    1. Authorization: Bearer <token> header (used by frontend on Vercel)
+    2. HttpOnly cookie cloudfs_token (fallback)
+    Raises AuthTokenInvalidError if neither is present or token is invalid.
     """
-    if not cloudfs_token:
+    token = None
+
+    # Try Authorization header first
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+
+    # Fall back to cookie
+    if not token:
+        token = cloudfs_token
+
+    if not token:
         raise AuthTokenInvalidError()
-    return await verify_jwt(cloudfs_token)
+
+    return await verify_jwt(token)
 
 
 async def get_current_user_tokens(
