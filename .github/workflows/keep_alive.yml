@@ -1,4 +1,4 @@
-name: Keep Render Backend Awake
+name: Keep Render Backend Awake (heartbeat)
 
 on:
   schedule:
@@ -11,4 +11,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Send GET request
-        run: curl https://your-backend-url.onrender.com/ping
+        run: curl https://cloudfs.onrender.com/ping
