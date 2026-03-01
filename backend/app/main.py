@@ -29,11 +29,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    # Ensure settings.frontend_url is EXACTLY https://cloudfs.vercel.app (no trailing slash)
     allow_origins=[settings.frontend_url],
-    allow_credentials=True,  # Required for cookie-based auth
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "If-Match"],
-    expose_headers=["ETag"],
+    allow_credentials=True,
+    allow_methods=["*"],     # Allows all standard HTTP methods
+    allow_headers=["*"],     # Allows all headers sent by the browser
+    expose_headers=["ETag", "Content-Length"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────

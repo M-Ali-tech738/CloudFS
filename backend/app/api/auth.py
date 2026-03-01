@@ -129,7 +129,7 @@ async def google_callback(
         value=jwt_token,
         httponly=True,
         secure=settings.is_production,
-        samesite="strict",
+        samesite="none",
         max_age=settings.jwt_expire_hours * 3600,
         path="/",
     )
