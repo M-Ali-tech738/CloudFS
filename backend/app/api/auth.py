@@ -128,8 +128,8 @@ async def google_callback(
         key="cloudfs_token",
         value=jwt_token,
         httponly=True,
-        secure=settings.is_production,
-        samesite="none",
+        secure=True,  # Always True for HTTPS
+        samesite="lax",  # Changed from "none" to "lax"
         max_age=settings.jwt_expire_hours * 3600,
         path="/",
     )
@@ -145,7 +145,15 @@ async def logout(
     """Revoke JWT (add JTI to Redis blocklist) and clear cookie."""
     if cloudfs_token:
         await revoke_jwt(cloudfs_token)
-    response.delete_cookie("cloudfs_token", path="/")
+
+    # Properly clear the cookie with same settings
+    response.delete_cookie(
+        key="cloudfs_token",
+        path="/",
+        secure=True,
+        samesite="lax",
+        httponly=True,
+    )
     return {"message": "Logged out successfully"}
 
 
