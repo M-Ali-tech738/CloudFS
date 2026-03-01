@@ -14,8 +14,8 @@ import type {
   ErrorCode,
 } from "@/types";
 
-// Use relative URLs so requests go through Next.js rewrites
-const BASE = ""; // Empty string means use relative URLs
+// Use absolute URL from environment variable so requests go directly to Render
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 // ── Error handling ────────────────────────────────────────────────────────────
 
@@ -91,8 +91,8 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
 
-  // Add /api prefix to all requests to use Next.js rewrites
-  const apiPath = path.startsWith('/') ? `/api${path}` : `/api/${path}`;
+  // Build the full URL to Render backend directly
+  const apiPath = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
   const res = await fetch(apiPath, {
     ...init,
@@ -112,7 +112,7 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
 
 export const auth = {
   /** Redirect to Google OAuth. Backend handles the full flow. */
-  loginUrl: () => `/api/auth/google/login`,  // Use /api prefix
+  loginUrl: () => `${API_BASE}/auth/google/login`,
 
   me: () => apiFetch<UserInfo>("/auth/me"),
 
@@ -170,8 +170,8 @@ export const files = {
 export function createEventSource(
   onEvent: (e: { type: string; folder_id?: string }) => void
 ): EventSource {
-  // Use relative URL with /api prefix for SSE
-  const es = new EventSource(`/api/events`, { withCredentials: true });
+  // Connect directly to Render backend for SSE
+  const es = new EventSource(`${API_BASE}/events`, { withCredentials: true });
   es.onmessage = (event) => {
     try {
       onEvent(JSON.parse(event.data));
