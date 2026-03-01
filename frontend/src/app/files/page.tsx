@@ -37,11 +37,14 @@ function formatDate(iso: string): string {
 
 export default function FilesPage() {
   const router = useRouter();
-  const { user, isUnauthenticated } = useUser();
+  const { user, isLoading: userLoading, isUnauthenticated, error: userError } = useUser();
   const [folderStack, setFolderStack] = useState<{ id: string; name: string }[]>([
     { id: "root", name: "My Drive" },
   ]);
   const currentFolder = folderStack[folderStack.length - 1];
+
+  // Add debugging
+  console.log("FilesPage render:", { user, userLoading, isUnauthenticated, userError });
 
   const { files, isLoading, error, deleteFile, renameFile, uploadFile, revalidate } =
     useFiles(currentFolder.id);
@@ -55,8 +58,13 @@ export default function FilesPage() {
 
   // Redirect if not authenticated
   useEffect(() => {
-    if (isUnauthenticated) router.push("/");
-  }, [isUnauthenticated, router]);
+    console.log("Auth check:", { isUnauthenticated, userLoading, user });
+
+    if (!userLoading && isUnauthenticated) {
+      console.log("Redirecting to login...");
+      router.push("/");
+    }
+  }, [isUnauthenticated, userLoading, user, router]);
 
   const showToast = useCallback(
     (message: string, type: "error" | "success" | "warn" = "error") => {
@@ -138,6 +146,18 @@ export default function FilesPage() {
     await auth.logout();
     router.push("/");
   };
+
+  // Show loading state while checking authentication
+  if (userLoading) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 rounded-full border-3 border-accent/40 border-t-accent animate-spin" />
+          <p className="text-text-muted text-sm">Checking authentication...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-surface flex flex-col">
@@ -241,20 +261,20 @@ export default function FilesPage() {
         {isLoading && (
           <div className="flex items-center gap-3 px-3 py-6 text-text-muted text-sm">
             <div className="w-4 h-4 rounded-full border-2 border-accent/40 border-t-accent animate-spin" />
-            Loading…
+            Loading files...
           </div>
         )}
 
         {error && (
           <div className="flex items-center gap-2 px-3 py-4 text-danger text-sm bg-danger/10 rounded-lg border border-danger/20 mt-2">
             <AlertTriangle size={15} />
-            {error.message}
+            {error.message} (Code: {error.code})
           </div>
         )}
 
         {!isLoading && !error && files.length === 0 && (
           <div className="px-3 py-12 text-center text-text-muted text-sm">
-            This folder is empty.
+            This folder is empty. Click Upload to add files.
           </div>
         )}
 
@@ -348,7 +368,7 @@ export default function FilesPage() {
         <span>
           {files.length} item{files.length !== 1 ? "s" : ""} · {currentFolder.name}
         </span>
-        <span>{user?.email}</span>
+        <span>{user?.email || 'Not signed in'}</span>
       </footer>
 
       {/* Toast notifications */}
