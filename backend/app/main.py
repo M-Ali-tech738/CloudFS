@@ -118,3 +118,15 @@ async def test():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/debug-auth")
+async def debug_auth(request: Request):
+    """Debug endpoint to check authentication cookies"""
+    cookies = request.cookies
+    headers = dict(request.headers)
+    return {
+        "cookies": cookies,
+        "has_token": "cloudfs_token" in cookies,
+        "authorization_header": headers.get("authorization"),
+        "all_headers": {k: v for k, v in headers.items() if "cookie" not in k.lower()},
+    }
