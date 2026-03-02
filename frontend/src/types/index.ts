@@ -27,6 +27,60 @@ export interface UploadResult {
   message: string;
 }
 
+// ── Connected Accounts ────────────────────────────────────────────────────────
+
+export interface ConnectedAccount {
+  id: string;
+  email: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  is_primary: boolean;
+  last_used_at: string | null;
+}
+
+// ── Storage Quota ─────────────────────────────────────────────────────────────
+
+export interface StorageQuota {
+  limit: number;           // Total storage limit in bytes
+  usage: number;           // Total usage in bytes
+  usage_in_drive: number;  // Usage in My Drive
+  usage_in_drive_trash: number;
+  account_email: string;
+  account_name: string;
+}
+
+// ── Navigation sections ───────────────────────────────────────────────────────
+
+export type NavSection = 
+  | "home"
+  | "recent"
+  | "starred"
+  | "shared"
+  | "trash"
+  | "drives"
+  | "my-drive"
+  | "computers"
+  | "storage";
+
+// ── Transfer ──────────────────────────────────────────────────────────────────
+
+export interface TransferRequest {
+  source_account_id: string;
+  destination_account_id: string;
+  file_id: string;
+  destination_folder_id?: string;
+  new_name?: string;
+  move?: boolean;
+}
+
+export interface TransferStatus {
+  transfer_id: string;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  progress: number;  // 0-100
+  message?: string;
+  error?: string;
+}
+
 // ── Error codes (spec §6) ─────────────────────────────────────────────────────
 
 export type ErrorCode =

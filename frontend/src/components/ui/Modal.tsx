@@ -1,40 +1,62 @@
 "use client";
-import { useEffect, ReactNode } from "react";
+
+import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 
 interface ModalProps {
   title: string;
+  children: React.ReactNode;
   onClose: () => void;
-  children: ReactNode;
+  isOpen?: boolean;
   width?: string;
 }
 
-export function Modal({ title, onClose, children, width = "max-w-md" }: ModalProps) {
+export function Modal({ title, children, onClose, isOpen = true, width = "max-w-md" }: ModalProps) {
+  const modalRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+
+    if (isOpen) {
+      document.addEventListener("keydown", handleEscape);
+      document.body.style.overflow = "hidden";
+    }
+
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+      document.body.style.overflow = "unset";
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in"
+      style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+      onClick={onClose}
+    >
       <div
-        className={`relative z-10 w-full ${width} animate-scale-in`}
-        style={{
-          background: "var(--bg-1)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: "10px",
-          boxShadow: "0 24px 48px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03)",
-        }}
+        ref={modalRef}
+        className={`w-full ${width} rounded-lg animate-in slide-in-from-bottom-4`}
+        style={{ background: "var(--bg-1)", border: "1px solid var(--border)" }}
+        onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--border)" }}>
-          <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
-          <button onClick={onClose} className="p-1 rounded hover:bg-surface-2 text-text-muted hover:text-text-primary transition-colors">
-            <X size={15} />
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "var(--border)" }}>
+          <h2 className="text-sm font-medium" style={{ color: "var(--text-1)" }}>{title}</h2>
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-white/5 transition-colors"
+          >
+            <X size={16} style={{ color: "var(--text-3)" }} />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+
+        {/* Content */}
+        <div className="p-4">{children}</div>
       </div>
     </div>
   );

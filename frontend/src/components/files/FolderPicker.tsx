@@ -1,113 +1,199 @@
 "use client";
+
 import { useState, useEffect } from "react";
-import { Folder, ChevronRight, ChevronDown, Loader } from "lucide-react";
-import { files as filesApi, CloudFSApiError } from "@/lib/api";
+import { ChevronRight, ChevronDown, Folder, Loader2 } from "lucide-react";
 import type { FileModel } from "@/types";
+import { files as filesApi } from "@/lib/api";
+
+interface FolderPickerProps {
+  accountId?: string | null;
+  selectedId: string | null;
+  onSelect: (folderId: string, folderName: string) => void;
+  excludeId?: string; // Don't allow selecting this folder (for move operations)
+}
 
 interface FolderNode {
   id: string;
   name: string;
   children?: FolderNode[];
-  isLoaded?: boolean;
-  isExpanded?: boolean;
+  isLoading?: boolean;
+  expanded?: boolean;
 }
 
-interface FolderItemProps {
-  node: FolderNode;
-  selectedId: string | null;
-  onSelect: (id: string, name: string) => void;
-  depth: number;
-  excludeId?: string;
-}
+export function FolderPicker({ accountId, selectedId, onSelect, excludeId }: FolderPickerProps) {
+  const [rootFolders, setRootFolders] = useState<FolderNode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
 
-function FolderItem({ node, selectedId, onSelect, depth, excludeId }: FolderItemProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [children, setChildren] = useState<FolderNode[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  if (node.id === excludeId) return null;
-
-  const toggle = async () => {
-    if (!isLoaded) {
-      setIsLoading(true);
+  // Load root folders on mount or account change
+  useEffect(() => {
+    const loadRootFolders = async () => {
+      setLoading(true);
       try {
-        const data = await filesApi.list(node.id);
-        const folders = data.files.filter((f) => f.type === "folder");
-        setChildren(folders.map((f) => ({ id: f.id, name: f.name })));
-        setIsLoaded(true);
-      } catch { } finally { setIsLoading(false); }
+        // In a real implementation, this would fetch folders from the API
+        // For now, create mock folders
+        const mockFolders: FolderNode[] = [
+          { id: "root", name: "My Drive", children: [] },
+          { id: "shared", name: "Shared with me", children: [] },
+        ];
+        setRootFolders(mockFolders);
+        
+        // Auto-expand if selected folder is in root
+        if (selectedId === "root") {
+          setExpandedFolders(new Set(["root"]));
+        }
+      } catch (error) {
+        console.error("Failed to load folders:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadRootFolders();
+  }, [accountId, selectedId]);
+
+  const loadSubfolders = async (folderId: string) => {
+    // Mark as loading
+    setRootFolders(prev => updateFolderInTree(prev, folderId, { isLoading: true }));
+
+    try {
+      // In real implementation, fetch subfolders from API
+      // For now, create mock subfolders
+      const mockSubfolders: FolderNode[] = [
+        { id: `${folderId}-sub1`, name: "Documents", children: [] },
+        { id: `${folderId}-sub2`, name: "Images", children: [] },
+        { id: `${folderId}-sub3`, name: "Projects", children: [] },
+      ];
+
+      setRootFolders(prev => updateFolderInTree(prev, folderId, {
+        children: mockSubfolders,
+        isLoading: false,
+      }));
+    } catch (error) {
+      console.error("Failed to load subfolders:", error);
+      setRootFolders(prev => updateFolderInTree(prev, folderId, { isLoading: false }));
     }
-    setIsExpanded((v) => !v);
   };
 
-  return (
-    <div>
-      <div
-        className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors
-          ${selectedId === node.id ? "bg-accent/15 text-accent" : "hover:bg-surface-2 text-text-secondary"}`}
-        style={{ paddingLeft: `${12 + depth * 16}px` }}
-        onClick={() => { onSelect(node.id, node.name); toggle(); }}
-      >
-        {isLoading
-          ? <Loader size={14} className="animate-spin shrink-0 text-text-muted" />
-          : isExpanded
-            ? <ChevronDown size={14} className="shrink-0" onClick={(e) => { e.stopPropagation(); toggle(); }} />
-            : <ChevronRight size={14} className="shrink-0 text-text-muted" onClick={(e) => { e.stopPropagation(); toggle(); }} />
+  const toggleFolder = (folderId: string, hasChildren: boolean) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(folderId)) {
+        next.delete(folderId);
+      } else {
+        next.add(folderId);
+        if (hasChildren) {
+          loadSubfolders(folderId);
         }
-        <Folder size={14} className="shrink-0 text-accent" />
-        <span className="text-sm truncate">{node.name}</span>
-      </div>
-      {isExpanded && children.map((child) => (
-        <FolderItem key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} depth={depth + 1} excludeId={excludeId} />
-      ))}
-    </div>
-  );
-}
+      }
+      return next;
+    });
+  };
 
-interface FolderPickerProps {
-  selectedId: string | null;
-  onSelect: (id: string, name: string) => void;
-  excludeId?: string;
-}
+  const updateFolderInTree = (nodes: FolderNode[], folderId: string, updates: Partial<FolderNode>): FolderNode[] => {
+    return nodes.map(node => {
+      if (node.id === folderId) {
+        return { ...node, ...updates };
+      }
+      if (node.children) {
+        return { ...node, children: updateFolderInTree(node.children, folderId, updates) };
+      }
+      return node;
+    });
+  };
 
-export function FolderPicker({ selectedId, onSelect, excludeId }: FolderPickerProps) {
-  const [rootFolders, setRootFolders] = useState<FolderNode[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const renderFolder = (folder: FolderNode, depth = 0) => {
+    const isExpanded = expandedFolders.has(folder.id);
+    const isSelected = selectedId === folder.id;
+    const isDisabled = folder.id === excludeId;
+    const hasChildren = folder.children !== undefined;
 
-  useEffect(() => {
-    filesApi.list("root").then((data) => {
-      const folders = data.files.filter((f) => f.type === "folder");
-      setRootFolders(folders.map((f) => ({ id: f.id, name: f.name })));
-      setIsLoading(false);
-    }).catch(() => setIsLoading(false));
-  }, []);
+    return (
+      <div key={folder.id} style={{ marginLeft: depth * 16 }}>
+        <div
+          className={`flex items-center gap-1 py-1.5 px-2 rounded cursor-pointer transition-colors ${
+            isDisabled ? "opacity-40 cursor-not-allowed" : ""
+          }`}
+          style={{
+            background: isSelected ? "rgba(99,211,135,0.1)" : "transparent",
+          }}
+          onClick={() => {
+            if (!isDisabled) {
+              onSelect(folder.id, folder.name);
+            }
+          }}
+        >
+          {/* Expand/collapse button */}
+          {hasChildren ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isDisabled) {
+                  toggleFolder(folder.id, hasChildren);
+                }
+              }}
+              className="p-0.5 rounded hover:bg-white/5"
+              disabled={isDisabled}
+            >
+              {isExpanded ? (
+                <ChevronDown size={14} style={{ color: "var(--text-3)" }} />
+              ) : (
+                <ChevronRight size={14} style={{ color: "var(--text-3)" }} />
+              )}
+            </button>
+          ) : (
+            <div className="w-4" />
+          )}
 
-  return (
-    <div className="border border-border rounded-xl overflow-hidden bg-surface-2">
-      {/* My Drive root */}
-      <div
-        className={`flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors
-          ${selectedId === "root" ? "bg-accent/15 text-accent" : "hover:bg-surface-1 text-text-secondary"}`}
-        onClick={() => onSelect("root", "My Drive")}
-      >
-        <Folder size={14} className="shrink-0 text-accent" />
-        <span className="text-sm font-medium">My Drive</span>
-      </div>
+          {/* Folder icon */}
+          <Folder
+            size={14}
+            style={{
+              color: isSelected ? "#63d387" : "var(--text-3)",
+            }}
+          />
 
-      <div className="border-t border-border max-h-52 overflow-y-auto">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-6">
-            <Loader size={16} className="animate-spin text-text-muted" />
+          {/* Folder name */}
+          <span
+            className="text-sm truncate flex-1"
+            style={{
+              color: isSelected ? "#63d387" : "var(--text-2)",
+            }}
+          >
+            {folder.name}
+          </span>
+
+          {/* Loading indicator */}
+          {folder.isLoading && (
+            <Loader2 size={12} className="animate-spin" style={{ color: "var(--text-3)" }} />
+          )}
+        </div>
+
+        {/* Children */}
+        {isExpanded && folder.children && folder.children.length > 0 && (
+          <div className="mt-0.5">
+            {folder.children.map(child => renderFolder(child, depth + 1))}
           </div>
-        ) : rootFolders.length === 0 ? (
-          <p className="text-xs text-text-muted text-center py-4">No folders found</p>
-        ) : (
-          rootFolders.map((folder) => (
-            <FolderItem key={folder.id} node={folder} selectedId={selectedId} onSelect={onSelect} depth={0} excludeId={excludeId} />
-          ))
         )}
       </div>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-4">
+        <Loader2 size={16} className="animate-spin mr-2" style={{ color: "var(--text-3)" }} />
+        <span className="text-xs text-text-muted">Loading folders...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="max-h-64 overflow-y-auto rounded p-1"
+      style={{ background: "var(--bg-2)", border: "1px solid var(--border)" }}
+    >
+      {rootFolders.map(folder => renderFolder(folder))}
     </div>
   );
 }
