@@ -86,32 +86,167 @@ export const auth = {
 };
 
 export const files = {
-  list: (folderId = "root", pageToken?: string) =>
-    withRetry(() => apiFetch<FileList>(`/files?folder_id=${folderId}${pageToken ? `&page_token=${pageToken}` : ""}`), "STORAGE_RATE_LIMITED"),
-  get: (fileId: string) => withRetry(() => apiFetch<FileModel>(`/file/${fileId}`), "STORAGE_PROVIDER_ERROR"),
-  search: (q: string, pageToken?: string) =>
-    apiFetch<FileList>(`/search?q=${encodeURIComponent(q)}${pageToken ? `&page_token=${pageToken}` : ""}`),
-  upload: (file: File, folderId = "root") => {
+  list: (folderId = "root", pageToken?: string, accountId?: string) => {
+    let url = `/files?folder_id=${folderId}`;
+    if (pageToken) url += `&page_token=${pageToken}`;
+    if (accountId) url += `&account_id=${accountId}`;
+    return withRetry(() => apiFetch<FileList>(url), "STORAGE_RATE_LIMITED");
+  },
+  
+  get: (fileId: string, accountId?: string) => {
+    let url = `/file/${fileId}`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return withRetry(() => apiFetch<FileModel>(url), "STORAGE_PROVIDER_ERROR");
+  },
+  
+  search: (q: string, pageToken?: string, accountId?: string) => {
+    let url = `/search?q=${encodeURIComponent(q)}`;
+    if (pageToken) url += `&page_token=${pageToken}`;
+    if (accountId) url += `&account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  upload: (file: File, folderId = "root", accountId?: string) => {
     const form = new FormData();
     form.append("file", file);
-    return withRetry(() => apiFetch<UploadResult>(`/upload?folder_id=${folderId}`, { method: "POST", body: form }), "STORAGE_RATE_LIMITED");
+    let url = `/upload?folder_id=${folderId}`;
+    if (accountId) url += `&account_id=${accountId}`;
+    return withRetry(() => apiFetch<UploadResult>(url, { method: "POST", body: form }), "STORAGE_RATE_LIMITED");
   },
-  createFolder: (name: string, parentFolderId = "root") =>
-    apiFetch<FileModel>(`/folder?folder_id=${parentFolderId}`, { method: "POST", body: JSON.stringify({ name }) }),
-  delete: (fileId: string, etag: string) => apiFetch<void>(`/file/${fileId}`, { method: "DELETE", etag }),
-  rename: (fileId: string, newName: string, etag: string) =>
-    withRetry(() => apiFetch<FileModel>(`/file/${fileId}`, { method: "PATCH", etag, body: JSON.stringify({ name: newName }) }), "STORAGE_PROVIDER_ERROR"),
-  move: (fileId: string, destinationFolderId: string, etag: string) =>
-    apiFetch<FileModel>(`/file/${fileId}/move`, { method: "POST", etag, body: JSON.stringify({ destination_folder_id: destinationFolderId }) }),
-  copy: (fileId: string, destinationFolderId: string, newName?: string) =>
-    apiFetch<FileModel>(`/file/${fileId}/copy`, { method: "POST", body: JSON.stringify({ destination_folder_id: destinationFolderId, name: newName }) }),
-  download: (fileId: string) => `${API_BASE}/file/${fileId}/download?token=${getToken()}`,
-  share: (fileId: string) => apiFetch<{ share_url: string }>(`/file/${fileId}/share`, { method: "POST" }),
-  preview: (fileId: string) => apiFetch<{ preview_url: string }>(`/preview/${fileId}`),
-  bulkDelete: (fileIds: string[], etags: Record<string, string>) =>
-    apiFetch<{ success: string[]; failed: any[] }>("/files/bulk/delete", { method: "POST", body: JSON.stringify({ file_ids: fileIds, etags }) }),
-  bulkMove: (fileIds: string[], destinationFolderId: string, etags: Record<string, string>) =>
-    apiFetch<{ success: string[]; failed: any[] }>("/files/bulk/move", { method: "POST", body: JSON.stringify({ file_ids: fileIds, destination_folder_id: destinationFolderId, etags }) }),
+  
+  createFolder: (name: string, parentFolderId = "root", accountId?: string) => {
+    let url = `/folder?folder_id=${parentFolderId}`;
+    if (accountId) url += `&account_id=${accountId}`;
+    return apiFetch<FileModel>(url, { method: "POST", body: JSON.stringify({ name }) });
+  },
+  
+  delete: (fileId: string, etag: string, accountId?: string) => {
+    let url = `/file/${fileId}`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<void>(url, { method: "DELETE", etag });
+  },
+  
+  rename: (fileId: string, newName: string, etag: string, accountId?: string) => {
+    let url = `/file/${fileId}`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return withRetry(() => apiFetch<FileModel>(url, { method: "PATCH", etag, body: JSON.stringify({ name: newName }) }), "STORAGE_PROVIDER_ERROR");
+  },
+  
+  move: (fileId: string, destinationFolderId: string, etag: string, accountId?: string) => {
+    let url = `/file/${fileId}/move`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<FileModel>(url, { method: "POST", etag, body: JSON.stringify({ destination_folder_id: destinationFolderId }) });
+  },
+  
+  copy: (fileId: string, destinationFolderId: string, newName?: string, accountId?: string) => {
+    let url = `/file/${fileId}/copy`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<FileModel>(url, { method: "POST", body: JSON.stringify({ destination_folder_id: destinationFolderId, name: newName }) });
+  },
+  
+  download: (fileId: string, accountId?: string) => {
+    let url = `${API_BASE}/file/${fileId}/download?token=${getToken()}`;
+    if (accountId) url += `&account_id=${accountId}`;
+    return url;
+  },
+  
+  share: (fileId: string, accountId?: string) => {
+    let url = `/file/${fileId}/share`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ share_url: string }>(url, { method: "POST" });
+  },
+  
+  preview: (fileId: string, accountId?: string) => {
+    let url = `/preview/${fileId}`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ preview_url: string }>(url);
+  },
+  
+  bulkDelete: (fileIds: string[], etags: Record<string, string>, accountId?: string) => {
+    let url = "/files/bulk/delete";
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ success: string[]; failed: any[] }>(url, { method: "POST", body: JSON.stringify({ file_ids: fileIds, etags }) });
+  },
+  
+  bulkMove: (fileIds: string[], destinationFolderId: string, etags: Record<string, string>, accountId?: string) => {
+    let url = "/files/bulk/move";
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ success: string[]; failed: any[] }>(url, { method: "POST", body: JSON.stringify({ file_ids: fileIds, destination_folder_id: destinationFolderId, etags }) });
+  },
+  
+  // New navigation endpoints
+  recent: (pageToken?: string, accountId?: string) => {
+    let url = "/recent";
+    if (pageToken) url += `?page_token=${pageToken}`;
+    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  starred: (pageToken?: string, accountId?: string) => {
+    let url = "/starred";
+    if (pageToken) url += `?page_token=${pageToken}`;
+    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  sharedWithMe: (pageToken?: string, accountId?: string) => {
+    let url = "/shared-with-me";
+    if (pageToken) url += `?page_token=${pageToken}`;
+    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  trash: (pageToken?: string, accountId?: string) => {
+    let url = "/trash";
+    if (pageToken) url += `?page_token=${pageToken}`;
+    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  star: (fileId: string, starred: boolean, accountId?: string) => {
+    let url = `/file/${fileId}/star`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ success: boolean }>(url, { method: "POST", body: JSON.stringify({ starred }) });
+  },
+  
+  restore: (fileId: string, etag: string, accountId?: string) => {
+    let url = `/file/${fileId}/restore`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<FileModel>(url, { method: "POST", etag });
+  },
+  
+  emptyTrash: (accountId?: string) => {
+    let url = "/trash/empty";
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<{ success: boolean }>(url, { method: "POST" });
+  },
+  
+  storageQuota: (accountId?: string) => {
+    let url = "/storage/quota";
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<any>(url);
+  },
+  
+  sharedDrives: (pageToken?: string, accountId?: string) => {
+    let url = "/shared-drives";
+    if (pageToken) url += `?page_token=${pageToken}`;
+    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
+    return apiFetch<FileList>(url);
+  },
+  
+  fileMetadata: (fileId: string, accountId?: string) => {
+    let url = `/file/${fileId}/metadata`;
+    if (accountId) url += `?account_id=${accountId}`;
+    return apiFetch<any>(url);
+  },
+  
+  transfer: (data: any) => {
+    return apiFetch<any>("/transfer/cross-account", { method: "POST", body: JSON.stringify(data) });
+  },
+  
+  transferStatus: (transferId: string) => {
+    return apiFetch<any>(`/transfer/${transferId}/status`);
+  },
 };
 
 export function createEventSource(onEvent: (e: { type: string; folder_id?: string }) => void): EventSource {
