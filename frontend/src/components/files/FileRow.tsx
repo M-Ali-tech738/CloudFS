@@ -104,6 +104,11 @@ export function FileRow({
     }
   };
 
+  const handleMouseLeave = () => {
+    handleMouseUp();
+    setShowActions(false);
+  };
+
   useEffect(() => {
     return () => {
       if (longPressTimer.current) {
@@ -138,9 +143,8 @@ export function FileRow({
       onDoubleClick={() => onDoubleClick(file)}
       onMouseDown={handleMouseDown}
       onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
+      onMouseLeave={handleMouseLeave}
       onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
     >
       {/* Checkbox (select mode) */}
       {isSelectMode && (

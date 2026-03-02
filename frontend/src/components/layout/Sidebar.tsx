@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type { NavSection, ConnectedAccount, StorageQuota } from "@/types";
 import { formatBytes } from "@/lib/utils";
+import { AccountSwitcher } from "./AccountSwitcher";  // Add this import
 
 interface SidebarProps {
   activeSection: NavSection;
