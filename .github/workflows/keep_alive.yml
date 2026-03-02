@@ -1,0 +1,19 @@
+name: Keep Render Backend Awake (heartbeat)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  schedule:
+    # Runs every 14 minutes
+    - cron: '*/14 * * * *'
+  workflow_dispatch: # This adds the "Run workflow" button manually
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send GET request to Render
+        run: |
+          curl -I https://cloudfs.onrender.com/ping
