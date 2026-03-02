@@ -174,7 +174,6 @@ export const files = {
     return apiFetch<{ success: string[]; failed: any[] }>(url, { method: "POST", body: JSON.stringify({ file_ids: fileIds, destination_folder_id: destinationFolderId, etags }) });
   },
   
-  // New navigation endpoints
   recent: (pageToken?: string, accountId?: string) => {
     let url = "/recent";
     if (pageToken) url += `?page_token=${pageToken}`;
@@ -249,10 +248,37 @@ export const files = {
   },
 };
 
+// Fixed SSE function - uses EventSource with token in URL (now supported by backend)
 export function createEventSource(onEvent: (e: { type: string; folder_id?: string }) => void): EventSource {
   const token = getToken();
-  const url = `${API_BASE}/events${token ? `?token=${token}` : ""}`;
-  const es = new EventSource(url, { withCredentials: true });
-  es.onmessage = (event) => { try { onEvent(JSON.parse(event.data)); } catch {} };
+  if (!token) {
+    console.warn("No token available for SSE connection");
+    // Return a dummy EventSource that does nothing
+    return { close: () => {} } as EventSource;
+  }
+  
+  const url = `${API_BASE}/events?token=${token}`;
+  console.log("Connecting to SSE:", url.replace(token, "REDACTED"));
+  
+  const es = new EventSource(url, { withCredentials: false }); // Don't send cookies, we use query param
+  
+  es.onopen = () => {
+    console.log("SSE connection opened");
+  };
+  
+  es.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      onEvent(data);
+    } catch (e) {
+      console.error("Failed to parse SSE event:", e);
+    }
+  };
+  
+  es.onerror = (error) => {
+    console.error("SSE connection error:", error);
+    // The browser will automatically reconnect
+  };
+  
   return es;
 }
