@@ -1,6 +1,6 @@
 {
-  "/_global-error/page": "/_global-error",
   "/_not-found/page": "/_not-found",
+  "/_global-error/page": "/_global-error",
   "/auth/callback/page": "/auth/callback",
   "/files/page": "/files",
   "/page": "/"

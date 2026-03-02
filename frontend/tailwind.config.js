@@ -4,29 +4,32 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        mono: ["'JetBrains Mono'", "monospace"],
-        sans: ["'DM Sans'", "sans-serif"],
+        mono: ["'IBM Plex Mono'", "monospace"],
+        sans: ["'IBM Plex Sans'", "sans-serif"],
       },
       colors: {
         surface: {
-          DEFAULT: "#0f1117",
-          1: "#161b27",
-          2: "#1e2538",
-          3: "#252d42",
+          DEFAULT: "#0a0c10",
+          1: "#0f1219",
+          2: "#151b26",
+          3: "#1c2333",
         },
         accent: {
-          DEFAULT: "#4ade80",
-          dim: "#22c55e",
-          muted: "rgba(74, 222, 128, 0.15)",
+          DEFAULT: "#63d387",
+          dim: "#3fb866",
+          muted: "rgba(99,211,135,0.1)",
         },
-        border: "rgba(255,255,255,0.07)",
+        border: "rgba(255,255,255,0.06)",
         text: {
-          primary: "#e8eaf0",
-          secondary: "#7c849a",
-          muted: "#4a5168",
+          primary: "#edf0f7",
+          secondary: "#8892a4",
+          muted: "#4d5668",
         },
         danger: "#f87171",
-        warn: "#fb923c",
+        warn: "#fbbf24",
+      },
+      borderRadius: {
+        DEFAULT: "6px",
       },
     },
   },
