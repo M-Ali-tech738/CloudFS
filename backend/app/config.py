@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -32,6 +33,25 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+    
+    @property
+    def cors_origins(self) -> list[str]:
+        """Get all allowed CORS origins based on environment"""
+        origins = ["http://localhost:3000"]
+        
+        if self.frontend_url and self.frontend_url not in origins:
+            origins.append(self.frontend_url)
+        
+        if self.is_production:
+            # Add common production URLs
+            origins.extend([
+                "https://cloud-fs-xi.vercel.app",
+                "https://cloud-fs-xi.vercel.app/",
+            ])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        return [x for x in origins if not (x in seen or seen.add(x))]
 
 
 @lru_cache

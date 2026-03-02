@@ -27,14 +27,16 @@ app = FastAPI(
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 
+# Get allowed origins from settings
+allowed_origins = settings.cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    # Ensure settings.frontend_url is EXACTLY https://cloudfs.vercel.app (no trailing slash)
-    allow_origins=[settings.frontend_url],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],     # Allows all standard HTTP methods
-    allow_headers=["*"],     # Allows all headers sent by the browser
-    expose_headers=["ETag", "Content-Length"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["ETag", "Content-Length", "Authorization"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -57,8 +59,7 @@ async def cloudfs_error_handler(request: Request, exc: CloudFSError):
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """
     Catch-all for unhandled exceptions.
-    Logs full trace, returns SERVER_INTERNAL with trace ID (spec §6).
-    PII never written to logs.
+    Logs full trace, returns SERVER_INTERNAL with trace ID.
     """
     trace_id = str(uuid.uuid4())
     logger.error(
@@ -92,32 +93,32 @@ async def startup():
     logger.info("CloudFS backend started")
 
 
-# FOR DEBUGGING
+# ── Debug endpoints ───────────────────────────────────────────────────────────
+
 @app.get("/debug-cors")
 async def debug_cors(request: Request):
     """Debug endpoint to check CORS configuration"""
     return {
         "frontend_url_setting": settings.frontend_url,
+        "allowed_origins": allowed_origins,
         "environment": settings.environment,
         "is_production": settings.is_production,
         "request_origin": request.headers.get("origin"),
         "request_method": request.method,
         "request_url": str(request.url),
-        "all_settings": {
-            "google_redirect_uri": settings.google_redirect_uri,
-            "frontend_url": settings.frontend_url,
-            "environment": settings.environment,
-        }
     }
+
+
 @app.get("/test")
 async def test():
     """Simple test endpoint to check if API is reachable"""
     return {"status": "ok", "message": "API is working"}
-###
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.get("/debug-auth")
 async def debug_auth(request: Request):
