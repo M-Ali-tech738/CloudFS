@@ -10,14 +10,13 @@ function AuthCallbackInner() {
 
   useEffect(() => {
     const token = searchParams.get("token");
-
     if (!token) {
       router.replace("/");
       return;
     }
 
-    // Set the cookie on the Vercel domain (same-origin — no cross-domain issues)
-    const maxAge = 24 * 60 * 60; // 24 hours in seconds
+    // Set cookie for 30 days on Vercel domain
+    const maxAge = 30 * 24 * 60 * 60;
     document.cookie = [
       `cloudfs_token=${token}`,
       `path=/`,
@@ -28,7 +27,6 @@ function AuthCallbackInner() {
       .filter(Boolean)
       .join("; ");
 
-    // Redirect to files
     router.replace("/files");
   }, [router, searchParams]);
 

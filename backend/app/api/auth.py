@@ -1,19 +1,21 @@
 """
-Auth endpoints — Google OAuth flow (spec §4, steps 1–10) + logout.
+Auth endpoints — Google OAuth flow + logout + silent token refresh.
 """
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, Request
 from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import httpx
 
 from app.config import get_settings
 from app.db.database import get_db, UserToken
-from app.services.jwt_service import create_jwt, revoke_jwt
-from app.services.token_encryption import encrypt_token
+from app.services.jwt_service import create_jwt, revoke_jwt, verify_jwt
+from app.services.token_encryption import encrypt_token, decrypt_token
 from app.core.auth_deps import get_current_user
-from app.core.errors import AuthGoogleRevokedError
+from app.core.errors import AuthGoogleRevokedError, AuthTokenInvalidError, AuthTokenExpiredError
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -44,7 +46,6 @@ def _make_flow() -> Flow:
 
 @router.get("/google/login")
 async def google_login():
-    """Step 2-3: Redirect browser to Google OAuth consent screen."""
     flow = _make_flow()
     auth_url, _ = flow.authorization_url(
         access_type="offline",
@@ -59,11 +60,6 @@ async def google_callback(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Steps 4-7: Exchange auth code -> Google tokens -> redirect to Vercel
-    with token so Vercel sets the cookie on its own domain (fixes cross-domain
-    cookie issues on Android Chrome with third-party cookies blocked).
-    """
     try:
         flow = _make_flow()
         flow.fetch_token(code=code)
@@ -72,7 +68,6 @@ async def google_callback(
         print(f"OAuth error: {e}")
         raise AuthGoogleRevokedError()
 
-    # Get user info
     async with httpx.AsyncClient() as client:
         user_info_resp = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -86,7 +81,6 @@ async def google_callback(
     if not user_id or not email:
         raise AuthGoogleRevokedError()
 
-    # Encrypt refresh token -> store in PostgreSQL
     refresh_token = credentials.refresh_token
     if not refresh_token:
         existing = await db.execute(
@@ -95,7 +89,6 @@ async def google_callback(
             .limit(1)
         )
         if not existing.scalar_one_or_none():
-            print(f"No refresh token and none stored for user {user_id}")
             raise AuthGoogleRevokedError()
     else:
         await db.execute(
@@ -113,14 +106,86 @@ async def google_callback(
         db.add(token_row)
         await db.commit()
 
-    # Issue backend JWT
     jwt_token = await create_jwt(user_id=user_id, email=email)
 
-    # Redirect to Vercel /auth/callback with token as query param
-    # Vercel will set the cookie on its own domain — fixes cross-domain cookie issues
+    # Redirect to Vercel callback page to set cookie on same domain
     return RedirectResponse(
         url=f"{settings.frontend_url}/auth/callback?token={jwt_token}"
     )
+
+
+@router.post("/refresh")
+async def refresh_token(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Silent token refresh — called by frontend when JWT expires.
+    Uses the stored Google refresh token to verify the user still has
+    valid Google access, then issues a fresh JWT.
+    No login required.
+    """
+    # Extract expired token from Authorization header or cookie
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+    if not token:
+        token = request.cookies.get("cloudfs_token")
+    if not token:
+        raise AuthTokenInvalidError()
+
+    # Decode WITHOUT verifying expiry — we allow expired tokens here
+    try:
+        from jose import jwt as jose_jwt
+        payload = jose_jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            options={"verify_exp": False},  # Allow expired tokens
+        )
+    except Exception:
+        raise AuthTokenInvalidError()
+
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    if not user_id or not email:
+        raise AuthTokenInvalidError()
+
+    # Get stored refresh token from DB
+    result = await db.execute(
+        select(UserToken)
+        .where(UserToken.user_id == user_id, UserToken.revoked == False)
+        .order_by(UserToken.created_at.desc())
+        .limit(1)
+    )
+    token_row = result.scalar_one_or_none()
+    if not token_row:
+        raise AuthGoogleRevokedError()
+
+    # Verify Google refresh token is still valid by refreshing it
+    google_refresh_token = decrypt_token(
+        token_row.refresh_token_enc,
+        token_row.refresh_token_iv
+    )
+
+    try:
+        creds = Credentials(
+            token=None,
+            refresh_token=google_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        creds.refresh(GoogleRequest())
+    except Exception as e:
+        print(f"Google refresh failed: {e}")
+        # Google token revoked — user must login again
+        raise AuthGoogleRevokedError()
+
+    # Issue new JWT
+    new_jwt = await create_jwt(user_id=user_id, email=email)
+    return {"token": new_jwt}
 
 
 @router.post("/logout")
@@ -129,7 +194,6 @@ async def logout(
     cloudfs_token: str | None = None,
     user: dict = Depends(get_current_user),
 ):
-    """Revoke JWT (add JTI to Redis blocklist) and clear cookie."""
     if cloudfs_token:
         await revoke_jwt(cloudfs_token)
     response.delete_cookie("cloudfs_token", path="/")
@@ -138,5 +202,4 @@ async def logout(
 
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)):
-    """Return current user info from JWT payload."""
     return {"user_id": user["sub"], "email": user["email"]}
