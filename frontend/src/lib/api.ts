@@ -1,7 +1,7 @@
 /**
  * API client — all backend communication.
  */
-import type { FileList, FileModel, UploadResult, ApiError, UserInfo, ErrorCode } from "@/types";
+import type { FileList, FileModel, UploadResult, ApiError, UserInfo, ErrorCode, ConnectedAccount } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://cloudfs.onrender.com";
 
@@ -77,6 +77,8 @@ export async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promis
   return res.json() as Promise<T>;
 }
 
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
 export const auth = {
   loginUrl: () => `${API_BASE}/auth/google/login`,
   me: () => apiFetch<UserInfo>("/auth/me"),
@@ -85,6 +87,22 @@ export const auth = {
   },
 };
 
+// ── Connected accounts ────────────────────────────────────────────────────────
+
+export const accounts = {
+  /** List all connected Google accounts for the current user. */
+  list: () => apiFetch<ConnectedAccount[]>("/accounts"),
+
+  /** Returns the URL to redirect the user to for adding another account. */
+  connectUrl: () => `${API_BASE}/accounts/connect`,
+
+  /** Soft-delete (revoke) a connected account. */
+  disconnect: (accountId: string) =>
+    apiFetch<void>(`/accounts/${accountId}`, { method: "DELETE" }),
+};
+
+// ── Files ─────────────────────────────────────────────────────────────────────
+
 export const files = {
   list: (folderId = "root", pageToken?: string, accountId?: string) => {
     let url = `/files?folder_id=${folderId}`;
@@ -92,20 +110,20 @@ export const files = {
     if (accountId) url += `&account_id=${accountId}`;
     return withRetry(() => apiFetch<FileList>(url), "STORAGE_RATE_LIMITED");
   },
-  
+
   get: (fileId: string, accountId?: string) => {
     let url = `/file/${fileId}`;
     if (accountId) url += `?account_id=${accountId}`;
     return withRetry(() => apiFetch<FileModel>(url), "STORAGE_PROVIDER_ERROR");
   },
-  
+
   search: (q: string, pageToken?: string, accountId?: string) => {
     let url = `/search?q=${encodeURIComponent(q)}`;
     if (pageToken) url += `&page_token=${pageToken}`;
     if (accountId) url += `&account_id=${accountId}`;
     return apiFetch<FileList>(url);
   },
-  
+
   upload: (file: File, folderId = "root", accountId?: string) => {
     const form = new FormData();
     form.append("file", file);
@@ -113,172 +131,168 @@ export const files = {
     if (accountId) url += `&account_id=${accountId}`;
     return withRetry(() => apiFetch<UploadResult>(url, { method: "POST", body: form }), "STORAGE_RATE_LIMITED");
   },
-  
+
   createFolder: (name: string, parentFolderId = "root", accountId?: string) => {
     let url = `/folder?folder_id=${parentFolderId}`;
     if (accountId) url += `&account_id=${accountId}`;
     return apiFetch<FileModel>(url, { method: "POST", body: JSON.stringify({ name }) });
   },
-  
+
   delete: (fileId: string, etag: string, accountId?: string) => {
     let url = `/file/${fileId}`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<void>(url, { method: "DELETE", etag });
   },
-  
+
   rename: (fileId: string, newName: string, etag: string, accountId?: string) => {
     let url = `/file/${fileId}`;
     if (accountId) url += `?account_id=${accountId}`;
     return withRetry(() => apiFetch<FileModel>(url, { method: "PATCH", etag, body: JSON.stringify({ name: newName }) }), "STORAGE_PROVIDER_ERROR");
   },
-  
+
   move: (fileId: string, destinationFolderId: string, etag: string, accountId?: string) => {
     let url = `/file/${fileId}/move`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<FileModel>(url, { method: "POST", etag, body: JSON.stringify({ destination_folder_id: destinationFolderId }) });
   },
-  
+
   copy: (fileId: string, destinationFolderId: string, newName?: string, accountId?: string) => {
     let url = `/file/${fileId}/copy`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<FileModel>(url, { method: "POST", body: JSON.stringify({ destination_folder_id: destinationFolderId, name: newName }) });
   },
-  
+
   download: (fileId: string, accountId?: string) => {
     let url = `${API_BASE}/file/${fileId}/download?token=${getToken()}`;
     if (accountId) url += `&account_id=${accountId}`;
     return url;
   },
-  
+
   share: (fileId: string, accountId?: string) => {
     let url = `/file/${fileId}/share`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ share_url: string }>(url, { method: "POST" });
   },
-  
+
   preview: (fileId: string, accountId?: string) => {
     let url = `/preview/${fileId}`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ preview_url: string }>(url);
   },
-  
+
   bulkDelete: (fileIds: string[], etags: Record<string, string>, accountId?: string) => {
     let url = "/files/bulk/delete";
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ success: string[]; failed: any[] }>(url, { method: "POST", body: JSON.stringify({ file_ids: fileIds, etags }) });
   },
-  
+
   bulkMove: (fileIds: string[], destinationFolderId: string, etags: Record<string, string>, accountId?: string) => {
     let url = "/files/bulk/move";
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ success: string[]; failed: any[] }>(url, { method: "POST", body: JSON.stringify({ file_ids: fileIds, destination_folder_id: destinationFolderId, etags }) });
   },
-  
+
   recent: (pageToken?: string, accountId?: string) => {
-    let url = "/recent";
-    if (pageToken) url += `?page_token=${pageToken}`;
-    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
-    return apiFetch<FileList>(url);
+    const params = new URLSearchParams();
+    if (pageToken) params.set("page_token", pageToken);
+    if (accountId) params.set("account_id", accountId);
+    const qs = params.toString();
+    return apiFetch<FileList>(`/recent${qs ? "?" + qs : ""}`);
   },
-  
+
   starred: (pageToken?: string, accountId?: string) => {
-    let url = "/starred";
-    if (pageToken) url += `?page_token=${pageToken}`;
-    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
-    return apiFetch<FileList>(url);
+    const params = new URLSearchParams();
+    if (pageToken) params.set("page_token", pageToken);
+    if (accountId) params.set("account_id", accountId);
+    const qs = params.toString();
+    return apiFetch<FileList>(`/starred${qs ? "?" + qs : ""}`);
   },
-  
+
   sharedWithMe: (pageToken?: string, accountId?: string) => {
-    let url = "/shared-with-me";
-    if (pageToken) url += `?page_token=${pageToken}`;
-    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
-    return apiFetch<FileList>(url);
+    const params = new URLSearchParams();
+    if (pageToken) params.set("page_token", pageToken);
+    if (accountId) params.set("account_id", accountId);
+    const qs = params.toString();
+    return apiFetch<FileList>(`/shared-with-me${qs ? "?" + qs : ""}`);
   },
-  
+
   trash: (pageToken?: string, accountId?: string) => {
-    let url = "/trash";
-    if (pageToken) url += `?page_token=${pageToken}`;
-    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
-    return apiFetch<FileList>(url);
+    const params = new URLSearchParams();
+    if (pageToken) params.set("page_token", pageToken);
+    if (accountId) params.set("account_id", accountId);
+    const qs = params.toString();
+    return apiFetch<FileList>(`/trash${qs ? "?" + qs : ""}`);
   },
-  
+
   star: (fileId: string, starred: boolean, accountId?: string) => {
     let url = `/file/${fileId}/star`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ success: boolean }>(url, { method: "POST", body: JSON.stringify({ starred }) });
   },
-  
+
   restore: (fileId: string, etag: string, accountId?: string) => {
     let url = `/file/${fileId}/restore`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<FileModel>(url, { method: "POST", etag });
   },
-  
+
   emptyTrash: (accountId?: string) => {
     let url = "/trash/empty";
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<{ success: boolean }>(url, { method: "POST" });
   },
-  
+
   storageQuota: (accountId?: string) => {
     let url = "/storage/quota";
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<any>(url);
   },
-  
+
   sharedDrives: (pageToken?: string, accountId?: string) => {
-    let url = "/shared-drives";
-    if (pageToken) url += `?page_token=${pageToken}`;
-    if (accountId) url += `${pageToken ? "&" : "?"}account_id=${accountId}`;
-    return apiFetch<FileList>(url);
+    const params = new URLSearchParams();
+    if (pageToken) params.set("page_token", pageToken);
+    if (accountId) params.set("account_id", accountId);
+    const qs = params.toString();
+    return apiFetch<FileList>(`/shared-drives${qs ? "?" + qs : ""}`);
   },
-  
+
   fileMetadata: (fileId: string, accountId?: string) => {
     let url = `/file/${fileId}/metadata`;
     if (accountId) url += `?account_id=${accountId}`;
     return apiFetch<any>(url);
   },
-  
-  transfer: (data: any) => {
-    return apiFetch<any>("/transfer/cross-account", { method: "POST", body: JSON.stringify(data) });
-  },
-  
-  transferStatus: (transferId: string) => {
-    return apiFetch<any>(`/transfer/${transferId}/status`);
-  },
+
+  transfer: (data: {
+    source_account_id: string;
+    destination_account_id: string;
+    file_id: string;
+    destination_folder_id?: string;
+    new_name?: string;
+    move?: boolean;
+  }) => apiFetch<{ transfer_id: string; status: string }>("/transfer/cross-account", {
+    method: "POST",
+    body: JSON.stringify(data),
+  }),
+
+  transferStatus: (transferId: string) =>
+    apiFetch<any>(`/transfer/${transferId}/status`),
 };
 
-// Fixed SSE function - uses EventSource with token in URL (now supported by backend)
+// ── SSE ───────────────────────────────────────────────────────────────────────
+
 export function createEventSource(onEvent: (e: { type: string; folder_id?: string }) => void): EventSource {
   const token = getToken();
   if (!token) {
     console.warn("No token available for SSE connection");
-    // Return a dummy EventSource that does nothing
     return { close: () => {} } as EventSource;
   }
-  
   const url = `${API_BASE}/events?token=${token}`;
-  console.log("Connecting to SSE:", url.replace(token, "REDACTED"));
-  
-  const es = new EventSource(url, { withCredentials: false }); // Don't send cookies, we use query param
-  
-  es.onopen = () => {
-    console.log("SSE connection opened");
-  };
-  
+  const es = new EventSource(url, { withCredentials: false });
+  es.onopen = () => console.log("SSE connected");
   es.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onEvent(data);
-    } catch (e) {
-      console.error("Failed to parse SSE event:", e);
-    }
+    try { onEvent(JSON.parse(event.data)); }
+    catch (e) { console.error("SSE parse error:", e); }
   };
-  
-  es.onerror = (error) => {
-    console.error("SSE connection error:", error);
-    // The browser will automatically reconnect
-  };
-  
+  es.onerror = (err) => console.error("SSE error:", err);
   return es;
 }
