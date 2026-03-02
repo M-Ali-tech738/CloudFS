@@ -11,6 +11,7 @@ import asyncio
 
 from app.config import get_settings
 from app.core.auth_deps import get_current_user_tokens, get_current_user
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ValidationFileTooLargeError, ValidationBadRequestError, StorageProviderError
 from app.models.file import FileList, FileModel, UploadResult
 from app.services.drive_adapter import GoogleDriveAdapter
