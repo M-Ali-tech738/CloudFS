@@ -10,6 +10,9 @@ import type {
   ErrorCode,
 } from "@/types";
 
+// Hardcoded fallback for production - ensures API calls go to Render even if env var is missing
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://cloudfs-1.onrender.com';
+
 export class CloudFSApiError extends Error {
   constructor(
     public code: ErrorCode,
@@ -86,7 +89,8 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
     headers.set("Content-Type", "application/json");
   }
 
-  const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}${path.startsWith("/") ? path : `/${path}`}`;
+  // Use API_BASE constant with fallback
+  const apiUrl = `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
   const res = await fetch(apiUrl, {
     ...init,
@@ -100,7 +104,8 @@ async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
 }
 
 export const auth = {
-  loginUrl: () => `${process.env.NEXT_PUBLIC_API_URL}/auth/google/login`,
+  // Use API_BASE constant with fallback
+  loginUrl: () => `${API_BASE}/auth/google/login`,
   me: () => apiFetch<UserInfo>("/auth/me"),
   logout: () => apiFetch<void>("/auth/logout", { method: "POST" }),
 };
@@ -145,7 +150,8 @@ export function createEventSource(
   onEvent: (e: { type: string; folder_id?: string }) => void
 ): EventSource {
   const token = getToken();
-  const url = `${process.env.NEXT_PUBLIC_API_URL}/events${token ? `?token=${token}` : ""}`;
+  // Use API_BASE constant with fallback
+  const url = `${API_BASE}/events${token ? `?token=${token}` : ""}`;
   const es = new EventSource(url, { withCredentials: true });
   es.onmessage = (event) => {
     try {
