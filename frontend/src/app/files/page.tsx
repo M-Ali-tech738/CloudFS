@@ -62,7 +62,7 @@ export default function FilesPage() {
 
     if (!userLoading && isUnauthenticated) {
       console.log("Redirecting to login...");
-      router.push("/");
+      window.location.href = "/";
     }
   }, [isUnauthenticated, userLoading, user, router]);
 
@@ -143,9 +143,9 @@ export default function FilesPage() {
   );
 
   const handleLogout = async () => {
-    await auth.logout();
-    router.push("/");
-  };
+  await auth.logout();
+  window.location.href = "/"; // hard redirect, not router.push
+};
 
   // Show loading state while checking authentication
   if (userLoading) {

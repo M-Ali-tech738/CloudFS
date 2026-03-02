@@ -107,7 +107,14 @@ export const auth = {
   // Use API_BASE constant with fallback
   loginUrl: () => `${API_BASE}/auth/google/login`,
   me: () => apiFetch<UserInfo>("/auth/me"),
-  logout: () => apiFetch<void>("/auth/logout", { method: "POST" }),
+  logout: async () => {
+  try {
+    await apiFetch<void>("/auth/logout", { method: "POST" });
+  } finally {
+    // Clear cookie on frontend regardless of backend response
+    document.cookie = "cloudfs_token=; path=/; max-age=0; SameSite=Strict; Secure";
+  }
+},
 };
 
 export const files = {

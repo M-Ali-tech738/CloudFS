@@ -8,12 +8,14 @@ export default function LoginPage() {
   const router = useRouter();
 
   useEffect(() => {
-    // If token already exists in cookie, skip login and go straight to files
+  const timer = setTimeout(() => {
     const match = document.cookie.match(/(?:^|;\s*)cloudfs_token=([^;]+)/);
-    if (match) {
+    if (match && match[1]) {
       router.replace("/files");
     }
-  }, [router]);
+  }, 100);
+  return () => clearTimeout(timer);
+}, [router]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-10 bg-surface">
