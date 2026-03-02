@@ -1,392 +1,382 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import {
-  Folder,
-  File,
-  Upload,
-  Trash2,
-  Pencil,
-  ExternalLink,
-  ArrowLeft,
-  LogOut,
-  RefreshCw,
-  AlertTriangle,
-} from "lucide-react";
+import { AlertTriangle, ChevronRight, LogOut, Cloud } from "lucide-react";
 
-import { useUser, useFiles, useSSE, useKeyboardNav } from "@/hooks";
-import { auth, files as filesApi, CloudFSApiError } from "@/lib/api";
+import { auth, files as filesApi } from "@/lib/api";
 import type { FileModel } from "@/types";
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-}
+import { useUser } from "@/hooks/useUser";
+import { useFiles } from "@/hooks/useFiles";
+import { useSearch } from "@/hooks/useSearch";
+import { useSelection } from "@/hooks/useSelection";
+import { usePreview } from "@/hooks/usePreview";
+import { useSSE, useKeyboardNav } from "@/hooks/useSSE";
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
+import { FileRow } from "@/components/files/FileRow";
+import { FileToolbar } from "@/components/files/FileToolbar";
+import { FilePreview } from "@/components/files/FilePreview";
+import { FolderPicker } from "@/components/files/FolderPicker";
+import { SearchBar } from "@/components/files/SearchBar";
+import { BulkActions } from "@/components/files/BulkActions";
+import { Modal } from "@/components/ui/Modal";
+import { Toast } from "@/components/ui/Toast";
+import { Spinner } from "@/components/ui/Spinner";
+
+type ToastState = { message: string; type: "success" | "error" | "warn" } | null;
+type ModalType = "rename" | "createFolder" | "move" | "copy" | "share" | "confirmDelete" | "bulkMove" | "bulkDelete" | null;
+type SortKey = "name" | "modified" | "size" | "type";
+
+function sortFiles(fileList: FileModel[], sortBy: SortKey): FileModel[] {
+  return [...fileList].sort((a, b) => {
+    if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+    switch (sortBy) {
+      case "name": return a.name.localeCompare(b.name);
+      case "modified": return new Date(b.modified_at as any).getTime() - new Date(a.modified_at as any).getTime();
+      case "size": return (b.size || 0) - (a.size || 0);
+      case "type": return (a.mime_type || "").localeCompare(b.mime_type || "");
+      default: return 0;
+    }
   });
 }
 
 export default function FilesPage() {
   const router = useRouter();
-  const { user, isLoading: userLoading, isUnauthenticated, error: userError } = useUser();
-  const [folderStack, setFolderStack] = useState<{ id: string; name: string }[]>([
-    { id: "root", name: "My Drive" },
-  ]);
+  const { user, isLoading: userLoading, isUnauthenticated } = useUser();
+
+  const [folderStack, setFolderStack] = useState<{ id: string; name: string }[]>([{ id: "root", name: "My Drive" }]);
   const currentFolder = folderStack[folderStack.length - 1];
 
-  // Add debugging
-  console.log("FilesPage render:", { user, userLoading, isUnauthenticated, userError });
+  const { files, isLoading, error, deleteFile, renameFile, moveFile, copyFile, uploadFile, createFolder, shareFile, bulkDelete, bulkMove, revalidate } = useFiles(currentFolder.id);
 
-  const { files, isLoading, error, deleteFile, renameFile, uploadFile, revalidate } =
-    useFiles(currentFolder.id);
+  const [sortBy, setSortBy] = useState<SortKey>("name");
+  const sortedFiles = useMemo(() => sortFiles(files, sortBy), [files, sortBy]);
 
-  useSSE(currentFolder.id);
+  const { selectedIds, selectedFiles, hasSelection, isSelectMode, toggleSelect, selectAll, clearSelection, onLongPressStart, onLongPressEnd } = useSelection(sortedFiles);
+  const { previewFile, openPreview, closePreview } = usePreview();
+  const { query, setQuery, results, isSearching, isOpen: isSearchOpen, openSearch, closeSearch } = useSearch();
 
   const [selectedIndex, setSelectedIndex] = useState(-1);
-  const [renameState, setRenameState] = useState<{ file: FileModel; value: string } | null>(null);
-  const [toast, setToast] = useState<{ message: string; type: "error" | "success" | "warn" } | null>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
-
-  // Redirect if not authenticated
-  useEffect(() => {
-    console.log("Auth check:", { isUnauthenticated, userLoading, user });
-
-    if (!userLoading && isUnauthenticated) {
-      console.log("Redirecting to login...");
-      window.location.href = "/";
+  const openFolder = useCallback((file: FileModel) => {
+    if (file.type === "folder") {
+      setFolderStack((s) => [...s, { id: file.id, name: file.name }]);
+      setSelectedIndex(-1);
+      closePreview();
     }
-  }, [isUnauthenticated, userLoading, user, router]);
+  }, [closePreview]);
 
-  const showToast = useCallback(
-    (message: string, type: "error" | "success" | "warn" = "error") => {
-      setToast({ message, type });
-      setTimeout(() => setToast(null), 4000);
-    },
-    []
-  );
+  useKeyboardNav(sortedFiles, selectedIndex, setSelectedIndex, openFolder);
+  useSSE(currentFolder.id);
 
-  const openFile = useCallback(
-    (file: FileModel) => {
-      if (file.type === "folder") {
-        setFolderStack((s) => [...s, { id: file.id, name: file.name }]);
-        setSelectedIndex(-1);
-      } else if (file.web_view_link) {
-        window.open(file.web_view_link, "_blank");
-      }
-    },
-    []
-  );
+  const [activeModal, setActiveModal] = useState<ModalType>(null);
+  const [targetFile, setTargetFile] = useState<FileModel | null>(null);
+  const [inputValue, setInputValue] = useState("");
+  const [pickerFolderId, setPickerFolderId] = useState<string | null>(null);
+  const [pickerFolderName, setPickerFolderName] = useState("");
+  const [shareUrl, setShareUrl] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [toast, setToast] = useState<ToastState>(null);
 
-  useKeyboardNav(files, selectedIndex, setSelectedIndex, openFile);
+  const showToast = useCallback((message: string, type: "success" | "error" | "warn" = "error") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  }, []);
 
-  const handleDelete = useCallback(
-    async (file: FileModel) => {
-      try {
-        await deleteFile(file);
-        showToast(`"${file.name}" deleted`, "success");
-      } catch (err) {
-        if (err instanceof CloudFSApiError && err.code === "CONFLICT_STALE_VERSION") {
-          showToast(
-            `"${file.name}" was modified on another device. Refresh and try again.`,
-            "warn"
-          );
-        } else {
-          showToast((err as Error).message);
-        }
-      }
-    },
-    [deleteFile, showToast]
-  );
+  useEffect(() => {
+    if (!userLoading && isUnauthenticated) window.location.href = "/";
+  }, [isUnauthenticated, userLoading]);
 
-  const handleRenameSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!renameState) return;
-      const { file, value } = renameState;
-      setRenameState(null);
-      try {
-        await renameFile(file, value);
-        showToast(`Renamed to "${value}"`, "success");
-      } catch (err) {
-        showToast((err as Error).message);
-      }
-    },
-    [renameState, renameFile, showToast]
-  );
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") { e.preventDefault(); openSearch(); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [openSearch]);
 
-  const handleUpload = useCallback(
-    async (fileList: FileList | null) => {
-      if (!fileList) return;
-      for (const file of Array.from(fileList)) {
-        try {
-          await uploadFile(file);
-          showToast(`Uploaded "${file.name}"`, "success");
-        } catch (err) {
-          if (err instanceof CloudFSApiError) {
-            showToast(err.message, "error");
-          } else {
-            showToast(`Upload failed: ${file.name}`);
-          }
-        }
-      }
-    },
-    [uploadFile, showToast]
-  );
+  const handleLogout = async () => { await auth.logout(); window.location.href = "/"; };
 
-  const handleLogout = async () => {
-  await auth.logout();
-  window.location.href = "/"; // hard redirect, not router.push
-};
+  const handleFileSingleClick = useCallback((file: FileModel) => {
+    setSelectedIndex(sortedFiles.indexOf(file));
+    if (file.type !== "folder") openPreview(file);
+  }, [sortedFiles, openPreview]);
 
-  // Show loading state while checking authentication
+  const handleFileDoubleClick = useCallback((file: FileModel) => {
+    if (file.type === "folder") openFolder(file);
+    else if (file.web_view_link) window.open(file.web_view_link, "_blank");
+  }, [openFolder]);
+
+  const handleDownload = useCallback((file: FileModel) => {
+    const a = document.createElement("a");
+    a.href = filesApi.download(file.id);
+    a.download = file.name;
+    a.click();
+  }, []);
+
+  const handleShare = useCallback(async (file: FileModel) => {
+    setTargetFile(file);
+    setActiveModal("share");
+    setIsProcessing(true);
+    try {
+      const { share_url } = await shareFile(file);
+      setShareUrl(share_url);
+    } catch (err: any) {
+      showToast(err.message || "Failed to generate share link");
+      setActiveModal(null);
+    } finally { setIsProcessing(false); }
+  }, [shareFile, showToast]);
+
+  const handleRename = useCallback((file: FileModel) => { setTargetFile(file); setInputValue(file.name); setActiveModal("rename"); }, []);
+  const handleDelete = useCallback((file: FileModel) => { setTargetFile(file); setActiveModal("confirmDelete"); }, []);
+  const handleMove = useCallback((file: FileModel) => { setTargetFile(file); setPickerFolderId(currentFolder.id); setPickerFolderName(currentFolder.name); setActiveModal("move"); }, [currentFolder]);
+  const handleCopy = useCallback((file: FileModel) => { setTargetFile(file); setPickerFolderId(currentFolder.id); setPickerFolderName(currentFolder.name); setActiveModal("copy"); }, [currentFolder]);
+  const handleBulkDelete = () => setActiveModal("bulkDelete");
+  const handleBulkMove = () => { setPickerFolderId(currentFolder.id); setPickerFolderName(currentFolder.name); setActiveModal("bulkMove"); };
+
+  const handleSearchSelect = useCallback((file: FileModel) => {
+    if (file.type === "folder") setFolderStack([{ id: "root", name: "My Drive" }, { id: file.id, name: file.name }]);
+    else openPreview(file);
+  }, [openPreview]);
+
+  const confirmRename = async () => {
+    if (!targetFile || !inputValue.trim()) return;
+    setIsProcessing(true);
+    try { await renameFile(targetFile, inputValue.trim()); showToast("Renamed", "success"); setActiveModal(null); }
+    catch (err: any) { showToast(err.message || "Rename failed"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmDelete = async () => {
+    if (!targetFile) return;
+    setIsProcessing(true);
+    try { await deleteFile(targetFile); showToast("Deleted", "success"); setActiveModal(null); if (previewFile?.id === targetFile.id) closePreview(); }
+    catch (err: any) { showToast(err.message || "Delete failed"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmMove = async () => {
+    if (!targetFile || !pickerFolderId) return;
+    setIsProcessing(true);
+    try { await moveFile(targetFile, pickerFolderId); showToast(`Moved to ${pickerFolderName}`, "success"); setActiveModal(null); }
+    catch (err: any) { showToast(err.message || "Move failed"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmCopy = async () => {
+    if (!targetFile || !pickerFolderId) return;
+    setIsProcessing(true);
+    try { await copyFile(targetFile, pickerFolderId); showToast(`Copied to ${pickerFolderName}`, "success"); setActiveModal(null); }
+    catch (err: any) { showToast(err.message || "Copy failed"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmCreateFolder = async () => {
+    if (!inputValue.trim()) return;
+    setIsProcessing(true);
+    try { await createFolder(inputValue.trim()); showToast("Folder created", "success"); setActiveModal(null); }
+    catch (err: any) { showToast(err.message || "Failed to create folder"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmBulkDelete = async () => {
+    setIsProcessing(true);
+    try {
+      const result = await bulkDelete(selectedFiles);
+      showToast(`Deleted ${result.success.length} files${result.failed.length ? `, ${result.failed.length} failed` : ""}`, result.failed.length ? "warn" : "success");
+      clearSelection(); setActiveModal(null);
+    } catch (err: any) { showToast(err.message || "Bulk delete failed"); }
+    finally { setIsProcessing(false); }
+  };
+
+  const confirmBulkMove = async () => {
+    if (!pickerFolderId) return;
+    setIsProcessing(true);
+    try {
+      const result = await bulkMove(selectedFiles, pickerFolderId);
+      showToast(`Moved ${result.success.length} files${result.failed.length ? `, ${result.failed.length} failed` : ""}`, result.failed.length ? "warn" : "success");
+      clearSelection(); setActiveModal(null);
+    } catch (err: any) { showToast(err.message || "Bulk move failed"); }
+    finally { setIsProcessing(false); }
+  };
+
   if (userLoading) {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 rounded-full border-3 border-accent/40 border-t-accent animate-spin" />
-          <p className="text-text-muted text-sm">Checking authentication...</p>
-        </div>
+        <div className="flex flex-col items-center gap-4"><Spinner size={32} /><p className="text-text-muted text-sm">Loading...</p></div>
       </div>
     );
   }
 
   return (
     <div className="min-h-screen bg-surface flex flex-col">
-      {/* Header */}
       <header className="sticky top-0 z-20 bg-surface/90 backdrop-blur border-b border-border px-4 py-3 flex items-center gap-3">
-        {/* Logo */}
         <div className="flex items-center gap-2 mr-2">
-          <div className="w-7 h-7 rounded-lg bg-accent-muted border border-accent/30 flex items-center justify-center">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M3 15a4 4 0 004 4h10a3 3 0 000-6 5 5 0 00-9.9-1A4 4 0 003 15z"
-                stroke="#4ade80"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <span className="font-mono text-sm font-semibold text-text-primary">CloudFS</span>
+          <Cloud size={18} className="text-accent" />
+          <span className="font-mono text-sm font-semibold text-text-primary hidden sm:block">CloudFS</span>
         </div>
-
-        {/* Breadcrumb */}
-        <div className="flex items-center gap-1 flex-1 overflow-hidden">
+        <nav className="flex items-center gap-1 flex-1 min-w-0">
           {folderStack.map((folder, i) => (
-            <div key={folder.id} className="flex items-center gap-1">
-              {i > 0 && <span className="text-text-muted text-sm">/</span>}
+            <div key={folder.id} className="flex items-center gap-1 min-w-0">
+              {i > 0 && <ChevronRight size={13} className="text-text-muted shrink-0" />}
               <button
-                onClick={() => setFolderStack((s) => s.slice(0, i + 1))}
-                className={`text-sm px-1.5 py-0.5 rounded transition-colors ${
-                  i === folderStack.length - 1
-                    ? "text-text-primary font-medium"
-                    : "text-text-secondary hover:text-text-primary"
-                }`}
-              >
-                {folder.name}
-              </button>
+                onClick={() => { setFolderStack(folderStack.slice(0, i + 1)); setSelectedIndex(-1); closePreview(); }}
+                className={`text-sm truncate max-w-32 transition-colors ${i === folderStack.length - 1 ? "text-text-primary font-medium" : "text-text-muted hover:text-text-secondary"}`}
+              >{folder.name}</button>
             </div>
+          ))}
+        </nav>
+        {user && (
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs text-text-muted hidden sm:block truncate max-w-32">{user.email}</span>
+            <button onClick={handleLogout} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-text-muted hover:text-text-primary hover:bg-surface-2 transition-colors" title="Sign out">
+              <LogOut size={13} /><span className="hidden sm:block">Sign out</span>
+            </button>
+          </div>
+        )}
+      </header>
+
+      <FileToolbar
+        onUpload={async (file) => { try { await uploadFile(file); showToast(`Uploaded ${file.name}`, "success"); } catch (err: any) { showToast(err.message || "Upload failed"); } }}
+        onCreateFolder={() => { setInputValue(""); setActiveModal("createFolder"); }}
+        onSearch={openSearch}
+        onRefresh={revalidate}
+        sortBy={sortBy}
+        onSortChange={(s) => setSortBy(s as SortKey)}
+        isLoading={isLoading}
+      />
+
+      {isSelectMode && hasSelection && (
+        <BulkActions selectedFiles={selectedFiles} allFiles={sortedFiles} onSelectAll={selectAll} onClearSelection={clearSelection} onBulkDelete={handleBulkDelete} onBulkMove={handleBulkMove} />
+      )}
+
+      <div className="flex flex-1 overflow-hidden">
+        <div className={`flex-1 overflow-y-auto p-3 ${previewFile ? "hidden lg:block lg:w-1/2" : ""}`}>
+          <div className="flex items-center gap-3 px-3 py-1.5 text-xs text-text-muted border-b border-border mb-1">
+            {isSelectMode && <div className="w-4" />}
+            <div className="w-4" />
+            <span className="flex-1">Name</span>
+            <span className="hidden sm:block w-20 text-right">Size</span>
+            <span className="hidden md:block w-28 text-right">Modified</span>
+          </div>
+
+          {isLoading && <div className="flex items-center gap-3 px-3 py-6 text-text-muted text-sm"><Spinner size={16} /> Loading files...</div>}
+          {error && <div className="flex items-center gap-2 px-3 py-4 text-danger text-sm bg-danger/10 rounded-lg border border-danger/20 mt-2"><AlertTriangle size={15} /> {error.message}</div>}
+          {!isLoading && !error && sortedFiles.length === 0 && <div className="px-3 py-12 text-center text-text-muted text-sm">This folder is empty.</div>}
+
+          {sortedFiles.map((file, index) => (
+            <FileRow
+              key={file.id} file={file}
+              isSelected={selectedIndex === index} isChecked={selectedIds.has(file.id)} isSelectMode={isSelectMode}
+              onSingleClick={handleFileSingleClick} onDoubleClick={handleFileDoubleClick}
+              onLongPressStart={onLongPressStart} onLongPressEnd={onLongPressEnd}
+              onToggleCheck={toggleSelect} onRename={handleRename} onDelete={handleDelete}
+              onMove={handleMove} onCopy={handleCopy} onDownload={handleDownload}
+              onShare={handleShare} onPreview={(f) => openPreview(f)}
+            />
           ))}
         </div>
 
-        {/* Actions */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => revalidate()}
-            className="p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-colors"
-            title="Refresh (r)"
-          >
-            <RefreshCw size={15} />
-          </button>
-
-          <button
-            onClick={() => uploadInputRef.current?.click()}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent-muted border border-accent/30
-              text-accent text-sm font-medium hover:bg-accent/20 transition-colors"
-          >
-            <Upload size={14} />
-            Upload
-          </button>
-          <input
-            ref={uploadInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => handleUpload(e.target.files)}
-          />
-
-          <div className="w-px h-5 bg-border mx-1" />
-
-          <button
-            onClick={handleLogout}
-            className="p-2 rounded-lg text-text-secondary hover:text-danger transition-colors"
-            title="Sign out"
-          >
-            <LogOut size={15} />
-          </button>
-        </div>
-      </header>
-
-      {/* Column headers */}
-      <div className="px-4 pt-4 pb-1">
-        <div className="flex items-center gap-3 px-3 py-1 text-xs font-mono text-text-muted uppercase tracking-wider">
-          <span className="flex-1">Name</span>
-          <span className="w-24 text-right hidden sm:block">Modified</span>
-          <span className="w-20 text-right hidden sm:block">Size</span>
-          <span className="w-16" />
-        </div>
+        {previewFile && (
+          <div className="w-full lg:w-1/2 border-l border-border overflow-hidden flex flex-col">
+            <FilePreview file={previewFile} onClose={closePreview} onDownload={handleDownload} />
+          </div>
+        )}
       </div>
 
-      {/* File list */}
-      <main className="flex-1 px-4 pb-8">
-        {/* Back button */}
-        {folderStack.length > 1 && (
-          <button
-            onClick={() => setFolderStack((s) => s.slice(0, -1))}
-            className="file-row w-full text-text-secondary hover:text-text-primary mb-1"
-          >
-            <ArrowLeft size={16} />
-            <span className="font-mono text-sm">..</span>
-          </button>
-        )}
-
-        {isLoading && (
-          <div className="flex items-center gap-3 px-3 py-6 text-text-muted text-sm">
-            <div className="w-4 h-4 rounded-full border-2 border-accent/40 border-t-accent animate-spin" />
-            Loading files...
+      {activeModal === "rename" && (
+        <Modal title={`Rename "${targetFile?.name}"`} onClose={() => setActiveModal(null)}>
+          <input autoFocus type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmRename()}
+            className="w-full bg-surface-2 border border-border rounded-xl px-3 py-2.5 text-sm text-text-primary focus:outline-none focus:border-accent" />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmRename} disabled={isProcessing} className="flex-1 py-2 rounded-xl bg-accent text-surface text-sm font-semibold hover:bg-accent/90 disabled:opacity-50 transition-colors">{isProcessing ? "Renaming..." : "Rename"}</button>
           </div>
-        )}
-
-        {error && (
-          <div className="flex items-center gap-2 px-3 py-4 text-danger text-sm bg-danger/10 rounded-lg border border-danger/20 mt-2">
-            <AlertTriangle size={15} />
-            {error.message} (Code: {error.code})
-          </div>
-        )}
-
-        {!isLoading && !error && files.length === 0 && (
-          <div className="px-3 py-12 text-center text-text-muted text-sm">
-            This folder is empty. Click Upload to add files.
-          </div>
-        )}
-
-        {files.map((file, index) => (
-          <div
-            key={file.id}
-            className={`file-row w-full group ${selectedIndex === index ? "selected" : ""}`}
-            onClick={() => {
-              setSelectedIndex(index);
-              if (selectedIndex === index) openFile(file);
-            }}
-            onDoubleClick={() => openFile(file)}
-            tabIndex={0}
-            role="row"
-          >
-            {/* Icon */}
-            {file.type === "folder" ? (
-              <Folder size={16} className="text-accent shrink-0" />
-            ) : (
-              <File size={16} className="text-text-secondary shrink-0" />
-            )}
-
-            {/* Name */}
-            <div className="flex-1 min-w-0">
-              {renameState?.file.id === file.id ? (
-                <form onSubmit={handleRenameSubmit} onClick={(e) => e.stopPropagation()}>
-                  <input
-                    autoFocus
-                    className="bg-surface-3 border border-accent/50 rounded px-2 py-0.5 text-sm
-                      text-text-primary font-mono w-full outline-none focus:border-accent"
-                    value={renameState.value}
-                    onChange={(e) =>
-                      setRenameState((s) => s && { ...s, value: e.target.value })
-                    }
-                    onBlur={() => setRenameState(null)}
-                    onKeyDown={(e) => e.key === "Escape" && setRenameState(null)}
-                  />
-                </form>
-              ) : (
-                <span className="font-mono text-sm truncate block">{file.name}</span>
-              )}
-            </div>
-
-            {/* Modified */}
-            <span className="text-xs text-text-muted w-24 text-right hidden sm:block shrink-0">
-              {formatDate(file.modified_at)}
-            </span>
-
-            {/* Size */}
-            <span className="text-xs text-text-muted w-20 text-right hidden sm:block shrink-0 font-mono">
-              {formatBytes(file.size)}
-            </span>
-
-            {/* Row actions */}
-            <div
-              className="w-16 flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100
-                transition-opacity shrink-0"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => setRenameState({ file, value: file.name })}
-                className="p-1.5 rounded hover:bg-surface-3 text-text-muted hover:text-text-primary transition-colors"
-                title="Rename"
-              >
-                <Pencil size={13} />
-              </button>
-              {file.web_view_link && (
-                <button
-                  onClick={() => window.open(file.web_view_link!, "_blank")}
-                  className="p-1.5 rounded hover:bg-surface-3 text-text-muted hover:text-text-primary transition-colors"
-                  title="Open in Drive"
-                >
-                  <ExternalLink size={13} />
-                </button>
-              )}
-              <button
-                onClick={() => handleDelete(file)}
-                className="p-1.5 rounded hover:bg-danger/15 text-text-muted hover:text-danger transition-colors"
-                title="Delete"
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          </div>
-        ))}
-      </main>
-
-      {/* Status bar */}
-      <footer className="sticky bottom-0 border-t border-border bg-surface/90 backdrop-blur px-4 py-2
-        flex items-center justify-between text-xs font-mono text-text-muted">
-        <span>
-          {files.length} item{files.length !== 1 ? "s" : ""} · {currentFolder.name}
-        </span>
-        <span>{user?.email || 'Not signed in'}</span>
-      </footer>
-
-      {/* Toast notifications */}
-      {toast && (
-        <div
-          className={`fixed bottom-14 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm
-            shadow-xl border font-medium transition-all z-50
-            ${
-              toast.type === "success"
-                ? "bg-accent-muted border-accent/30 text-accent"
-                : toast.type === "warn"
-                ? "bg-warn/10 border-warn/30 text-warn"
-                : "bg-danger/10 border-danger/30 text-danger"
-            }`}
-        >
-          {toast.message}
-        </div>
+        </Modal>
       )}
+
+      {activeModal === "createFolder" && (
+        <Modal title="New Folder" onClose={() => setActiveModal(null)}>
+          <input autoFocus type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmCreateFolder()}
+            placeholder="Folder name" className="w-full bg-surface-2 border border-border rounded-xl px-3 py-2.5 text-sm text-text-primary focus:outline-none focus:border-accent placeholder:text-text-muted" />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmCreateFolder} disabled={isProcessing || !inputValue.trim()} className="flex-1 py-2 rounded-xl bg-accent text-surface text-sm font-semibold hover:bg-accent/90 disabled:opacity-50 transition-colors">{isProcessing ? "Creating..." : "Create"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "confirmDelete" && (
+        <Modal title="Delete file?" onClose={() => setActiveModal(null)}>
+          <p className="text-sm text-text-secondary mb-4">Delete <strong className="text-text-primary">"{targetFile?.name}"</strong>? This cannot be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmDelete} disabled={isProcessing} className="flex-1 py-2 rounded-xl bg-red-900 border border-red-700 text-sm font-semibold text-red-300 hover:bg-red-800 disabled:opacity-50 transition-colors">{isProcessing ? "Deleting..." : "Delete"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "move" && (
+        <Modal title={`Move "${targetFile?.name}"`} onClose={() => setActiveModal(null)} width="max-w-sm">
+          <p className="text-xs text-text-muted mb-3">Select destination folder:</p>
+          <FolderPicker selectedId={pickerFolderId} onSelect={(id, name) => { setPickerFolderId(id); setPickerFolderName(name); }} excludeId={targetFile?.id} />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmMove} disabled={isProcessing || !pickerFolderId} className="flex-1 py-2 rounded-xl bg-accent text-surface text-sm font-semibold hover:bg-accent/90 disabled:opacity-50 transition-colors">{isProcessing ? "Moving..." : "Move here"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "copy" && (
+        <Modal title={`Copy "${targetFile?.name}"`} onClose={() => setActiveModal(null)} width="max-w-sm">
+          <p className="text-xs text-text-muted mb-3">Select destination folder:</p>
+          <FolderPicker selectedId={pickerFolderId} onSelect={(id, name) => { setPickerFolderId(id); setPickerFolderName(name); }} />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmCopy} disabled={isProcessing || !pickerFolderId} className="flex-1 py-2 rounded-xl bg-accent text-surface text-sm font-semibold hover:bg-accent/90 disabled:opacity-50 transition-colors">{isProcessing ? "Copying..." : "Copy here"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "share" && (
+        <Modal title={`Share "${targetFile?.name}"`} onClose={() => setActiveModal(null)}>
+          {isProcessing ? (
+            <div className="flex items-center justify-center py-6 gap-3"><Spinner size={20} /><span className="text-sm text-text-muted">Generating link...</span></div>
+          ) : (
+            <>
+              <p className="text-xs text-text-muted mb-2">Anyone with this link can view:</p>
+              <div className="flex gap-2">
+                <input readOnly value={shareUrl} className="flex-1 bg-surface-2 border border-border rounded-xl px-3 py-2 text-xs text-text-primary focus:outline-none" />
+                <button onClick={() => { navigator.clipboard.writeText(shareUrl); showToast("Link copied!", "success"); }} className="px-3 py-2 rounded-xl bg-accent text-surface text-xs font-semibold hover:bg-accent/90 transition-colors">Copy</button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
+      {activeModal === "bulkDelete" && (
+        <Modal title="Delete selected files?" onClose={() => setActiveModal(null)}>
+          <p className="text-sm text-text-secondary mb-4">Delete <strong className="text-text-primary">{selectedFiles.length} files</strong>? This cannot be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmBulkDelete} disabled={isProcessing} className="flex-1 py-2 rounded-xl bg-red-900 border border-red-700 text-sm font-semibold text-red-300 hover:bg-red-800 disabled:opacity-50 transition-colors">{isProcessing ? "Deleting..." : `Delete ${selectedFiles.length} files`}</button>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "bulkMove" && (
+        <Modal title={`Move ${selectedFiles.length} files`} onClose={() => setActiveModal(null)} width="max-w-sm">
+          <p className="text-xs text-text-muted mb-3">Select destination folder:</p>
+          <FolderPicker selectedId={pickerFolderId} onSelect={(id, name) => { setPickerFolderId(id); setPickerFolderName(name); }} />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setActiveModal(null)} className="flex-1 py-2 rounded-xl bg-surface-2 border border-border text-sm text-text-secondary hover:bg-surface-1 transition-colors">Cancel</button>
+            <button onClick={confirmBulkMove} disabled={isProcessing || !pickerFolderId} className="flex-1 py-2 rounded-xl bg-accent text-surface text-sm font-semibold hover:bg-accent/90 disabled:opacity-50 transition-colors">{isProcessing ? "Moving..." : `Move ${selectedFiles.length} files here`}</button>
+          </div>
+        </Modal>
+      )}
+
+      {isSearchOpen && <SearchBar query={query} onQueryChange={setQuery} results={results} isSearching={isSearching} onClose={closeSearch} onSelectResult={handleSearchSelect} />}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
     </div>
   );
 }
