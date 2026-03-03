@@ -34,7 +34,7 @@ class UserToken(Base):
     __tablename__ = "user_tokens"
 
     id: Mapped[str] = mapped_column(
-        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
@@ -52,7 +52,7 @@ class ConnectedAccount(Base):
     __tablename__ = "connected_accounts"
 
     id: Mapped[str] = mapped_column(
-        PG_UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     owner_user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     google_sub: Mapped[str] = mapped_column(String, nullable=False)
