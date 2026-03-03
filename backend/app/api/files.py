@@ -2,12 +2,12 @@
 Files API — all file operations including full Drive navigation and cross-account transfers.
 """
 import json
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, UploadFile, File, Query, Request, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 import httpx
-import asyncio
 
 from app.config import get_settings
 from app.core.auth_deps import get_current_user_tokens, get_current_user
@@ -21,6 +21,13 @@ from sqlalchemy import select, and_
 
 settings = get_settings()
 router = APIRouter(prefix="", tags=["files"])
+
+SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/drive",
+]
 
 
 def _get_adapter(refresh_token: str, access_token: str = "") -> GoogleDriveAdapter:
@@ -41,13 +48,13 @@ async def _fresh_access_token(refresh_token: str) -> str:
     return resp.json().get("access_token", "")
 
 
-# ── Existing endpoints (updated with account_id) ─────────────────────────
+# ── Core file endpoints ───────────────────────────────────────────────────
 
 @router.get("/files", response_model=FileList)
 async def list_files(
     folder_id: str = Query(default="root"),
     page_token: str | None = Query(default=None),
-    account_id: str | None = Query(default=None, description="Specific account ID to use"),
+    account_id: str | None = Query(default=None),
     auth: tuple = Depends(get_current_user_tokens),
 ):
     user, refresh_token, acc_id = auth
@@ -57,9 +64,9 @@ async def list_files(
 
 @router.get("/file/{file_id}", response_model=FileModel)
 async def get_file(
-    file_id: str, 
+    file_id: str,
     account_id: str | None = Query(default=None),
-    auth: tuple = Depends(get_current_user_tokens)
+    auth: tuple = Depends(get_current_user_tokens),
 ):
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
@@ -68,7 +75,7 @@ async def get_file(
 
 @router.get("/search", response_model=FileList)
 async def search_files(
-    q: str = Query(..., description="Search query"),
+    q: str = Query(...),
     page_token: str | None = Query(default=None),
     account_id: str | None = Query(default=None),
     auth: tuple = Depends(get_current_user_tokens),
@@ -95,7 +102,8 @@ async def upload_file(
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
     return await _get_adapter(refresh_token, access_token).upload_file(
-        name=file.filename, content=content,
+        name=file.filename,
+        content=content,
         mime_type=file.content_type or "application/octet-stream",
         parent_folder_id=folder_id,
     )
@@ -142,11 +150,12 @@ async def update_file(
         raise ValidationBadRequestError("If-Match header is required")
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
-    adapter = _get_adapter(refresh_token, access_token)
     new_name = body.get("name")
     if not new_name:
         raise ValidationBadRequestError("'name' field is required")
-    return await adapter.rename_file(file_id=file_id, new_name=new_name, etag=if_match)
+    return await _get_adapter(refresh_token, access_token).rename_file(
+        file_id=file_id, new_name=new_name, etag=if_match
+    )
 
 
 @router.post("/file/{file_id}/move", response_model=FileModel)
@@ -194,19 +203,16 @@ async def download_file(
     adapter = _get_adapter(refresh_token, access_token)
     file = await adapter.get_file(file_id)
     download_url = await adapter.get_download_url(file_id)
-
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.get(
             download_url,
             headers={"Authorization": f"Bearer {access_token}"},
             follow_redirects=True,
         )
-
-    filename = file.name
     return StreamingResponse(
         content=resp.aiter_bytes(),
         media_type=resp.headers.get("content-type", "application/octet-stream"),
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{file.name}"'},
     )
 
 
@@ -255,9 +261,9 @@ async def bulk_move(
 
 @router.get("/preview/{file_id}")
 async def get_preview(
-    file_id: str, 
+    file_id: str,
     account_id: str | None = Query(default=None),
-    auth: tuple = Depends(get_current_user_tokens)
+    auth: tuple = Depends(get_current_user_tokens),
 ):
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
@@ -276,7 +282,7 @@ async def sse_events(
     adapter = _get_adapter(refresh_token, access_token)
 
     async def event_generator():
-        yield "data: {\"type\": \"connected\"}\n\n"
+        yield 'data: {"type": "connected"}\n\n'
         async for event in adapter.watch_changes(user_id=user["sub"]):
             yield f"data: {json.dumps(event)}\n\n"
 
@@ -287,7 +293,7 @@ async def sse_events(
     )
 
 
-# ── New navigation endpoints ─────────────────────────────────────────────
+# ── Navigation section endpoints ─────────────────────────────────────────
 
 @router.get("/recent", response_model=FileList)
 async def get_recent_files(
@@ -358,8 +364,7 @@ async def restore_from_trash(
         raise ValidationBadRequestError("If-Match header is required")
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
-    file = await _get_adapter(refresh_token, access_token).restore_from_trash(file_id, if_match)
-    return file
+    return await _get_adapter(refresh_token, access_token).restore_from_trash(file_id, if_match)
 
 
 @router.post("/trash/empty")
@@ -380,8 +385,7 @@ async def get_storage_quota(
 ):
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
-    quota = await _get_adapter(refresh_token, access_token).get_storage_quota()
-    return quota
+    return await _get_adapter(refresh_token, access_token).get_storage_quota()
 
 
 @router.get("/shared-drives", response_model=FileList)
@@ -403,11 +407,90 @@ async def get_file_metadata(
 ):
     user, refresh_token, acc_id = auth
     access_token = await _fresh_access_token(refresh_token)
-    metadata = await _get_adapter(refresh_token, access_token).get_file_metadata(file_id)
-    return metadata
+    return await _get_adapter(refresh_token, access_token).get_file_metadata(file_id)
 
 
-# ── Cross-account transfer endpoints ─────────────────────────────────────
+# ── Connected accounts ────────────────────────────────────────────────────
+
+@router.get("/accounts")
+async def list_accounts(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ConnectedAccount)
+        .where(
+            and_(
+                ConnectedAccount.owner_user_id == user["sub"],
+                ConnectedAccount.revoked == False,
+            )
+        )
+        .order_by(ConnectedAccount.is_primary.desc(), ConnectedAccount.created_at.asc())
+    )
+    accounts = result.scalars().all()
+    return [
+        {
+            "id": acc.id,
+            "email": acc.email,
+            "display_name": acc.display_name,
+            "avatar_url": acc.avatar_url,
+            "is_primary": acc.is_primary,
+            "last_used_at": acc.last_used_at.isoformat() if acc.last_used_at else None,
+        }
+        for acc in accounts
+    ]
+
+
+@router.get("/accounts/connect")
+async def connect_account_start(user: dict = Depends(get_current_user)):
+    """Start OAuth flow to add another Google account."""
+    from google_auth_oauthlib.flow import Flow as OAuthFlow
+    flow = OAuthFlow.from_client_config(
+        {
+            "web": {
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uris": [settings.google_redirect_uri],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=SCOPES,
+        redirect_uri=settings.google_redirect_uri,
+    )
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent select_account",
+        state=f"connect:{user['sub']}",
+    )
+    return RedirectResponse(auth_url)
+
+
+@router.delete("/accounts/{account_id}", status_code=204)
+async def disconnect_account(
+    account_id: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ConnectedAccount).where(
+            and_(
+                ConnectedAccount.id == account_id,
+                ConnectedAccount.owner_user_id == user["sub"],
+                ConnectedAccount.revoked == False,
+            )
+        )
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise ValidationBadRequestError("Account not found")
+    if account.is_primary:
+        raise ValidationBadRequestError("Cannot disconnect primary account")
+    account.revoked = True
+    await db.commit()
+
+
+# ── Cross-account transfer ────────────────────────────────────────────────
 
 @router.post("/transfer/cross-account")
 async def transfer_cross_account(
@@ -416,67 +499,51 @@ async def transfer_cross_account(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Transfer a file from one connected account to another.
-    Body: {
-        "source_account_id": "uuid",
-        "destination_account_id": "uuid",
-        "file_id": "google_file_id",
-        "destination_folder_id": "optional_folder_id",
-        "new_name": "optional_new_name",
-        "move": false  # true for move (delete after copy), false for copy
-    }
-    """
     source_account_id = body.get("source_account_id")
     dest_account_id = body.get("destination_account_id")
     file_id = body.get("file_id")
     dest_folder_id = body.get("destination_folder_id", "root")
     new_name = body.get("new_name")
     should_move = body.get("move", False)
-    
-    if not source_account_id or not dest_account_id or not file_id:
-        raise ValidationBadRequestError("source_account_id, destination_account_id, and file_id are required")
-    
+
+    if not all([source_account_id, dest_account_id, file_id]):
+        raise ValidationBadRequestError(
+            "source_account_id, destination_account_id, and file_id are required"
+        )
+
     user_id = user["sub"]
-    
-    # Get source account
+
     source_result = await db.execute(
-        select(ConnectedAccount)
-        .where(
+        select(ConnectedAccount).where(
             and_(
                 ConnectedAccount.id == source_account_id,
                 ConnectedAccount.owner_user_id == user_id,
-                ConnectedAccount.revoked == False
+                ConnectedAccount.revoked == False,
             )
         )
     )
     source = source_result.scalar_one_or_none()
     if not source:
         raise ValidationBadRequestError("Source account not found")
-    
-    # Get destination account
+
     dest_result = await db.execute(
-        select(ConnectedAccount)
-        .where(
+        select(ConnectedAccount).where(
             and_(
                 ConnectedAccount.id == dest_account_id,
                 ConnectedAccount.owner_user_id == user_id,
-                ConnectedAccount.revoked == False
+                ConnectedAccount.revoked == False,
             )
         )
     )
     dest = dest_result.scalar_one_or_none()
     if not dest:
         raise ValidationBadRequestError("Destination account not found")
-    
-    # Decrypt refresh tokens
+
     source_refresh = decrypt_token(source.encrypted_refresh_token, source.refresh_token_iv)
     dest_refresh = decrypt_token(dest.encrypted_refresh_token, dest.refresh_token_iv)
-    
-    # Create transfer task
+
     transfer_id = str(uuid.uuid4())
-    
-    # Run transfer in background
+
     background_tasks.add_task(
         _execute_cross_account_transfer,
         transfer_id=transfer_id,
@@ -488,12 +555,8 @@ async def transfer_cross_account(
         should_move=should_move,
         user_id=user_id,
     )
-    
-    return {
-        "transfer_id": transfer_id,
-        "status": "started",
-        "message": "Transfer started in background"
-    }
+
+    return {"transfer_id": transfer_id, "status": "started"}
 
 
 @router.get("/transfer/{transfer_id}/status")
@@ -501,15 +564,8 @@ async def get_transfer_status(
     transfer_id: str,
     user: dict = Depends(get_current_user),
 ):
-    """Get status of a background transfer."""
-    # In a real implementation, store status in Redis
-    # For now, return mock status
-    return {
-        "transfer_id": transfer_id,
-        "status": "in_progress",
-        "progress": 50,
-        "message": "Transferring file..."
-    }
+    # TODO: persist status in Redis and read here
+    return {"transfer_id": transfer_id, "status": "in_progress", "progress": 50}
 
 
 async def _execute_cross_account_transfer(
@@ -522,48 +578,36 @@ async def _execute_cross_account_transfer(
     should_move: bool,
     user_id: str,
 ):
-    """Background task for cross-account transfer."""
     try:
-        # Get access tokens
         source_access = await _fresh_access_token(source_refresh)
         dest_access = await _fresh_access_token(dest_refresh)
-        
-        # Create adapter with source account
+
         source_adapter = _get_adapter(source_refresh, source_access)
-        
-        # Get file metadata from source
         file_meta = await source_adapter.get_file(file_id)
-        
-        # Download from source
         download_url = await source_adapter.get_download_url(file_id)
-        async with httpx.AsyncClient() as client:
-            download_resp = await client.get(
+
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.get(
                 download_url,
                 headers={"Authorization": f"Bearer {source_access}"},
                 follow_redirects=True,
             )
-        
-        if download_resp.status_code != 200:
-            raise Exception(f"Download failed: {download_resp.status_code}")
-        
-        content = download_resp.content
-        
-        # Upload to destination
+
+        if resp.status_code != 200:
+            raise Exception(f"Download failed: HTTP {resp.status_code}")
+
         dest_adapter = _get_adapter(dest_refresh, dest_access)
-        result = await dest_adapter.upload_file(
+        await dest_adapter.upload_file(
             name=new_name or file_meta.name,
-            content=content,
+            content=resp.content,
             mime_type=file_meta.mime_type,
             parent_folder_id=dest_folder_id,
         )
-        
-        # If move requested, delete from source
+
         if should_move:
             await source_adapter.delete_file(file_id, file_meta.etag)
-        
-        # Store success status in Redis (not implemented)
-        print(f"Transfer {transfer_id} completed successfully")
-        
+
+        print(f"[Transfer {transfer_id}] Completed")
+
     except Exception as e:
-        print(f"Transfer {transfer_id} failed: {e}")
-        # Store error status in Redis (not implemented)
+        print(f"[Transfer {transfer_id}] Failed: {type(e).__name__}: {e}")

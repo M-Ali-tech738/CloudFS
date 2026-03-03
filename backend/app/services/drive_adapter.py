@@ -9,10 +9,12 @@ from typing import AsyncIterator, Optional
 
 import httpx
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 
+from app.config import get_settings
 from app.core.storage_interface import StorageInterface
 from app.core.errors import (
     StorageNotFoundError,
@@ -22,6 +24,8 @@ from app.core.errors import (
     ConflictStaleVersionError,
 )
 from app.models.file import FileModel, FileList, FileType, UploadResult
+
+settings = get_settings()
 
 _FILE_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,thumbnailLink,starred,trashed,permissions,description,shared,ownedByMe"
 _LIST_FIELDS = f"nextPageToken,files({_FILE_FIELDS})"
@@ -78,10 +82,9 @@ class GoogleDriveAdapter(StorageInterface):
         self._service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     async def _execute(self, request):
-        """Execute a Drive API request asynchronously."""
         return await asyncio.to_thread(lambda: request.execute())
 
-    # ── Existing methods ─────────────────────────────────────────────────
+    # ── Core methods ──────────────────────────────────────────────────────
 
     async def list_files(self, folder_id: str = "root", page_token: str | None = None) -> FileList:
         try:
@@ -93,9 +96,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -137,9 +138,7 @@ class GoogleDriveAdapter(StorageInterface):
             current = await self.get_file(file_id)
             if current.etag != etag:
                 raise ConflictStaleVersionError(file_id)
-            await self._execute(
-                self._service.files().delete(fileId=file_id)
-            )
+            await self._execute(self._service.files().delete(fileId=file_id))
         except (ConflictStaleVersionError, StorageNotFoundError):
             raise
         except HttpError as e:
@@ -255,9 +254,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -272,8 +269,7 @@ class GoogleDriveAdapter(StorageInterface):
         success, failed = [], []
         for file_id in file_ids:
             try:
-                etag = etags.get(file_id, "")
-                await self.delete_file(file_id, etag)
+                await self.delete_file(file_id, etags.get(file_id, ""))
                 success.append(file_id)
             except Exception as e:
                 failed.append({"id": file_id, "error": str(e)})
@@ -283,8 +279,7 @@ class GoogleDriveAdapter(StorageInterface):
         success, failed = [], []
         for file_id in file_ids:
             try:
-                etag = etags.get(file_id, "")
-                await self.move_file(file_id, destination_folder_id, etag)
+                await self.move_file(file_id, destination_folder_id, etags.get(file_id, ""))
                 success.append(file_id)
             except Exception as e:
                 failed.append({"id": file_id, "error": str(e)})
@@ -322,10 +317,9 @@ class GoogleDriveAdapter(StorageInterface):
         except Exception as e:
             print(f"Unexpected error in watch_changes: {type(e).__name__}: {e}")
 
-    # ── New methods for full navigation ─────────────────────────────────
+    # ── Navigation section methods ────────────────────────────────────────
 
     async def get_recent_files(self, page_token: str | None = None) -> FileList:
-        """Get recently accessed files (last 7 days by default)."""
         try:
             params = dict(
                 q="trashed=false",
@@ -335,9 +329,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -349,7 +341,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_starred_files(self, page_token: str | None = None) -> FileList:
-        """Get starred files."""
         try:
             params = dict(
                 q="starred=true and trashed=false",
@@ -359,9 +350,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -373,7 +362,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_shared_with_me(self, page_token: str | None = None) -> FileList:
-        """Get files shared with the user."""
         try:
             params = dict(
                 q="sharedWithMe=true and trashed=false",
@@ -383,9 +371,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -397,7 +383,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_trash_files(self, page_token: str | None = None) -> FileList:
-        """Get files in trash."""
         try:
             params = dict(
                 q="trashed=true",
@@ -407,9 +392,7 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            result = await self._execute(
-                self._service.files().list(**params)
-            )
+            result = await self._execute(self._service.files().list(**params))
             return FileList(
                 files=[_parse_file(f) for f in result.get("files", [])],
                 next_page_token=result.get("nextPageToken"),
@@ -421,7 +404,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_storage_quota(self) -> dict:
-        """Get storage quota information."""
         try:
             about = await self._execute(
                 self._service.about().get(fields="storageQuota,user")
@@ -442,7 +424,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_shared_drives(self, page_token: str | None = None) -> FileList:
-        """Get list of shared drives (team drives)."""
         try:
             params = dict(
                 fields="nextPageToken,drives(id,name,createdTime,capabilities)",
@@ -450,15 +431,9 @@ class GoogleDriveAdapter(StorageInterface):
             )
             if page_token:
                 params["pageToken"] = page_token
-            
-            result = await self._execute(
-                self._service.drives().list(**params)
-            )
-            
-            # Convert drives to FileModel format
-            drives = result.get("drives", [])
+            result = await self._execute(self._service.drives().list(**params))
             files = []
-            for drive in drives:
+            for drive in result.get("drives", []):
                 files.append(FileModel(
                     id=drive["id"],
                     name=drive["name"],
@@ -471,11 +446,7 @@ class GoogleDriveAdapter(StorageInterface):
                     etag=drive.get("id", ""),
                     version=0,
                 ))
-            
-            return FileList(
-                files=files,
-                next_page_token=result.get("nextPageToken"),
-            )
+            return FileList(files=files, next_page_token=result.get("nextPageToken"))
         except HttpError as e:
             _handle_drive_error(e)
         except Exception as e:
@@ -483,7 +454,6 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def star_file(self, file_id: str, starred: bool = True) -> None:
-        """Star or unstar a file."""
         try:
             await self._execute(
                 self._service.files().update(
@@ -499,12 +469,10 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def restore_from_trash(self, file_id: str, etag: str) -> FileModel:
-        """Restore a file from trash."""
         try:
             current = await self.get_file(file_id)
             if current.etag != etag:
                 raise ConflictStaleVersionError(file_id)
-            
             item = await self._execute(
                 self._service.files().update(
                     fileId=file_id,
@@ -522,11 +490,8 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def empty_trash(self) -> None:
-        """Permanently delete all files in trash."""
         try:
-            await self._execute(
-                self._service.files().emptyTrash()
-            )
+            await self._execute(self._service.files().emptyTrash())
         except HttpError as e:
             _handle_drive_error(e)
         except Exception as e:
@@ -534,15 +499,13 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def get_file_metadata(self, file_id: str) -> dict:
-        """Get detailed file metadata including permissions."""
         try:
-            file = await self._execute(
+            return await self._execute(
                 self._service.files().get(
                     fileId=file_id,
-                    fields="id,name,mimeType,size,createdTime,modifiedTime,owners,permissions,shared,ownedByMe,capabilities,description,starred,trashed,parents,webViewLink,thumbnailLink,iconLink,hasThumbnail,thumbnailVersion,viewedByMe,viewedByMeTime,modifiedByMe,modifiedByMeTime,sharedWithMeTime,sharingUser,version,fileExtension,md5Checksum,quotaBytesUsed,headRevisionId,imageMediaMetadata,videoMediaMetadata"
+                    fields="id,name,mimeType,size,createdTime,modifiedTime,owners,permissions,shared,ownedByMe,capabilities,description,starred,trashed,parents,webViewLink,thumbnailLink,iconLink,hasThumbnail,viewedByMeTime,modifiedByMeTime,version,fileExtension,md5Checksum,quotaBytesUsed",
                 )
             )
-            return file
         except HttpError as e:
             _handle_drive_error(e, file_id)
         except Exception as e:
@@ -550,19 +513,20 @@ class GoogleDriveAdapter(StorageInterface):
             raise StorageProviderError(str(e))
 
     async def copy_cross_account(
-        self, 
-        file_id: str, 
+        self,
+        file_id: str,
         source_account_refresh_token: str,
         destination_account_refresh_token: str,
         destination_folder_id: str = "root",
-        new_name: str | None = None
+        new_name: str | None = None,
     ) -> FileModel:
         """
         Copy a file from one Google account to another.
-        This downloads from source and uploads to destination.
+        Downloads from source, uploads to destination.
+        Note: This method is kept for convenience but the preferred approach
+        is to use the /transfer/cross-account endpoint which runs as a background task.
         """
         try:
-            # Get source file metadata
             source_creds = Credentials(
                 token=None,
                 refresh_token=source_account_refresh_token,
@@ -571,29 +535,25 @@ class GoogleDriveAdapter(StorageInterface):
                 client_secret=settings.google_client_secret,
             )
             source_creds.refresh(GoogleRequest())
-            
+
             source_service = build("drive", "v3", credentials=source_creds, cache_discovery=False)
-            
-            # Get file metadata from source
             file_meta = await asyncio.to_thread(
                 lambda: source_service.files().get(fileId=file_id, fields=_FILE_FIELDS).execute()
             )
-            
-            # Download file content from source
+
             download_url = await self.get_download_url(file_id)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 download_resp = await client.get(
                     download_url,
                     headers={"Authorization": f"Bearer {source_creds.token}"},
                     follow_redirects=True,
                 )
-            
+
             if download_resp.status_code != 200:
                 raise StorageProviderError(f"Failed to download file: {download_resp.status_code}")
-            
+
             content = download_resp.content
-            
-            # Upload to destination
+
             dest_creds = Credentials(
                 token=None,
                 refresh_token=destination_account_refresh_token,
@@ -602,23 +562,25 @@ class GoogleDriveAdapter(StorageInterface):
                 client_secret=settings.google_client_secret,
             )
             dest_creds.refresh(GoogleRequest())
-            
+
             dest_service = build("drive", "v3", credentials=dest_creds, cache_discovery=False)
-            
-            # Prepare upload
-            media = MediaInMemoryUpload(content, mimetype=file_meta.get("mimeType", "application/octet-stream"), resumable=False)
+            media = MediaInMemoryUpload(
+                content,
+                mimetype=file_meta.get("mimeType", "application/octet-stream"),
+                resumable=False,
+            )
             metadata = {
                 "name": new_name or file_meta["name"],
                 "parents": [destination_folder_id],
             }
-            
-            # Upload to destination
             uploaded = await asyncio.to_thread(
-                lambda: dest_service.files().create(body=metadata, media_body=media, fields=_FILE_FIELDS).execute()
+                lambda: dest_service.files().create(
+                    body=metadata, media_body=media, fields=_FILE_FIELDS
+                ).execute()
             )
-            
+
             return _parse_file(uploaded)
-            
+
         except Exception as e:
             print(f"Unexpected error in copy_cross_account: {type(e).__name__}: {e}")
             raise StorageProviderError(str(e))

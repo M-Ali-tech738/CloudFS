@@ -1,5 +1,5 @@
 """
-Auth endpoints — Google OAuth flow + logout + silent token refresh.
+Auth endpoints — Google OAuth flow + logout + silent token refresh + add-account flow.
 """
 from fastapi import APIRouter, Depends, Response, Request
 from fastapi.responses import RedirectResponse
@@ -7,15 +7,16 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 import httpx
+import uuid
 
 from app.config import get_settings
-from app.db.database import get_db, UserToken
-from app.services.jwt_service import create_jwt, revoke_jwt, verify_jwt
+from app.db.database import get_db, UserToken, ConnectedAccount
+from app.services.jwt_service import create_jwt, revoke_jwt
 from app.services.token_encryption import encrypt_token, decrypt_token
 from app.core.auth_deps import get_current_user
-from app.core.errors import AuthGoogleRevokedError, AuthTokenInvalidError, AuthTokenExpiredError
+from app.core.errors import AuthGoogleRevokedError, AuthTokenInvalidError
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -47,25 +48,27 @@ def _make_flow() -> Flow:
 @router.get("/google/login")
 async def google_login():
     flow = _make_flow()
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-    )
+    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
     return RedirectResponse(auth_url)
 
 
 @router.get("/google/callback")
 async def google_callback(
     code: str,
-    response: Response,
+    state: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Handles two flows:
+      1. Normal login  — state is None
+      2. Add-account   — state = 'connect:<owner_user_id>'
+    """
     try:
         flow = _make_flow()
         flow.fetch_token(code=code)
         credentials = flow.credentials
     except Exception as e:
-        print(f"OAuth error: {e}")
+        print(f"OAuth token exchange error: {e}")
         raise AuthGoogleRevokedError()
 
     async with httpx.AsyncClient() as client:
@@ -75,43 +78,108 @@ async def google_callback(
         )
     user_info = user_info_resp.json()
 
-    user_id = user_info.get("id")
+    google_sub = user_info.get("id")
     email = user_info.get("email")
+    display_name = user_info.get("name")
+    avatar_url = user_info.get("picture")
 
-    if not user_id or not email:
+    if not google_sub or not email:
         raise AuthGoogleRevokedError()
 
     refresh_token = credentials.refresh_token
+
+    # ── Add-account flow ─────────────────────────────────────────────────
+    if state and state.startswith("connect:"):
+        owner_user_id = state.split(":", 1)[1]
+
+        if not refresh_token:
+            return RedirectResponse(f"{settings.frontend_url}/files?error=no_refresh_token")
+
+        enc_token, iv = encrypt_token(refresh_token)
+
+        existing_result = await db.execute(
+            select(ConnectedAccount).where(
+                ConnectedAccount.owner_user_id == owner_user_id,
+                ConnectedAccount.google_sub == google_sub,
+            )
+        )
+        existing = existing_result.scalar_one_or_none()
+
+        if existing:
+            existing.encrypted_refresh_token = enc_token
+            existing.refresh_token_iv = iv
+            existing.display_name = display_name
+            existing.avatar_url = avatar_url
+            existing.revoked = False
+        else:
+            db.add(ConnectedAccount(
+                id=str(uuid.uuid4()),
+                owner_user_id=owner_user_id,
+                google_sub=google_sub,
+                email=email,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                encrypted_refresh_token=enc_token,
+                refresh_token_iv=iv,
+                is_primary=False,
+            ))
+
+        await db.commit()
+        return RedirectResponse(f"{settings.frontend_url}/files?connected=1")
+
+    # ── Normal login flow ────────────────────────────────────────────────
     if not refresh_token:
-        existing = await db.execute(
+        existing_result = await db.execute(
             select(UserToken)
-            .where(UserToken.user_id == user_id, UserToken.revoked == False)
+            .where(UserToken.user_id == google_sub, UserToken.revoked == False)
             .limit(1)
         )
-        if not existing.scalar_one_or_none():
+        if not existing_result.scalar_one_or_none():
             raise AuthGoogleRevokedError()
     else:
         await db.execute(
-            __import__("sqlalchemy").update(UserToken)
-            .where(UserToken.user_id == user_id)
-            .values(revoked=True)
+            update(UserToken).where(UserToken.user_id == google_sub).values(revoked=True)
         )
         enc_token, iv = encrypt_token(refresh_token)
-        token_row = UserToken(
-            user_id=user_id,
+        db.add(UserToken(
+            user_id=google_sub,
             email=email,
             refresh_token_enc=enc_token,
             refresh_token_iv=iv,
+        ))
+
+        # Seed primary ConnectedAccount (upsert)
+        existing_primary_result = await db.execute(
+            select(ConnectedAccount).where(
+                ConnectedAccount.owner_user_id == google_sub,
+                ConnectedAccount.google_sub == google_sub,
+            )
         )
-        db.add(token_row)
+        existing_primary = existing_primary_result.scalar_one_or_none()
+
+        if existing_primary:
+            existing_primary.encrypted_refresh_token = enc_token
+            existing_primary.refresh_token_iv = iv
+            existing_primary.display_name = display_name
+            existing_primary.avatar_url = avatar_url
+            existing_primary.revoked = False
+        else:
+            db.add(ConnectedAccount(
+                id=str(uuid.uuid4()),
+                owner_user_id=google_sub,
+                google_sub=google_sub,
+                email=email,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                encrypted_refresh_token=enc_token,
+                refresh_token_iv=iv,
+                is_primary=True,
+            ))
+
         await db.commit()
 
-    jwt_token = await create_jwt(user_id=user_id, email=email)
-
-    # Redirect to Vercel callback page to set cookie on same domain
-    return RedirectResponse(
-        url=f"{settings.frontend_url}/auth/callback?token={jwt_token}"
-    )
+    jwt_token = await create_jwt(user_id=google_sub, email=email)
+    return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?token={jwt_token}")
 
 
 @router.post("/refresh")
@@ -119,13 +187,7 @@ async def refresh_token(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Silent token refresh — called by frontend when JWT expires.
-    Uses the stored Google refresh token to verify the user still has
-    valid Google access, then issues a fresh JWT.
-    No login required.
-    """
-    # Extract expired token from Authorization header or cookie
+    """Silent token refresh — allows expired JWTs."""
     token = None
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
@@ -135,14 +197,13 @@ async def refresh_token(
     if not token:
         raise AuthTokenInvalidError()
 
-    # Decode WITHOUT verifying expiry — we allow expired tokens here
     try:
         from jose import jwt as jose_jwt
         payload = jose_jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
-            options={"verify_exp": False},  # Allow expired tokens
+            options={"verify_exp": False},
         )
     except Exception:
         raise AuthTokenInvalidError()
@@ -152,7 +213,6 @@ async def refresh_token(
     if not user_id or not email:
         raise AuthTokenInvalidError()
 
-    # Get stored refresh token from DB
     result = await db.execute(
         select(UserToken)
         .where(UserToken.user_id == user_id, UserToken.revoked == False)
@@ -163,11 +223,7 @@ async def refresh_token(
     if not token_row:
         raise AuthGoogleRevokedError()
 
-    # Verify Google refresh token is still valid by refreshing it
-    google_refresh_token = decrypt_token(
-        token_row.refresh_token_enc,
-        token_row.refresh_token_iv
-    )
+    google_refresh_token = decrypt_token(token_row.refresh_token_enc, token_row.refresh_token_iv)
 
     try:
         creds = Credentials(
@@ -180,10 +236,8 @@ async def refresh_token(
         creds.refresh(GoogleRequest())
     except Exception as e:
         print(f"Google refresh failed: {e}")
-        # Google token revoked — user must login again
         raise AuthGoogleRevokedError()
 
-    # Issue new JWT
     new_jwt = await create_jwt(user_id=user_id, email=email)
     return {"token": new_jwt}
 
